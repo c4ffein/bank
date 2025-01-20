@@ -77,6 +77,7 @@ def usage(wrong_config=False, wrong_command=False, wrong_arg_len=False):
         '    "id": "name-XXXX"',
         '    "secret_key": "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"',
         '    "local_store_path": "XX"',
+        "  - certificates = sha256sum of der_cert_bin",
         "=======================",
         "- bank                   ==> list all",
         "=======================",
@@ -87,29 +88,31 @@ def usage(wrong_config=False, wrong_command=False, wrong_arg_len=False):
 
 
 class Account:
-    def __init__(self, account_dict):
-        # TODO : cert_checksum in config, passed directly in __init__ through intermediary, use in methods
+    def __init__(self, account_dict, cert_checksum):
         self.endpoint = b"thirdparty.qonto.com"
         account_keys = ["id", "secret_key", "local_store_path"]
         self.organization_slug, self.secret_key, self.local_store_path = (account_dict[k] for k in account_keys)
         self.account_infos = None
+        self.cert_checksum = cert_checksum
 
     @property
     def auth_str(self):
         return str.encode(f"{self.organization_slug}:{self.secret_key}")
 
-    def get_infos(self, cert_checksum):
-        self.account_infos = get_body(self.endpoint, b"/v2/organization", cert_checksum, authorization=self.auth_str)
+    def get_infos(self):
+        self.account_infos = get_body(
+            self.endpoint, b"/v2/organization", self.cert_checksum, authorization=self.auth_str
+        )
 
-    def print_infos(self, cert_checksum):
+    def print_infos(self):
         pp(self.account_infos)
 
-    def print_transactions(self, cert_checksum):
-        self.get_infos(cert_checksum)
+    def print_transactions(self):
+        self.get_infos()
         account_id = str.encode(self.account_infos["organization"]["bank_accounts"][0]["id"])
         assert len(account_id) == 36 and all(chr(c) in "0123456789abcdef-" for c in account_id)
         url = b"/v2/transactions?bank_account_id="
-        ts = get_body(self.endpoint, url + account_id, cert_checksum, authorization=self.auth_str)
+        ts = get_body(self.endpoint, url + account_id, self.cert_checksum, authorization=self.auth_str)
         for t in ts["transactions"]:
             label = f"{Color.WHITE.value}{t['label']}{Color.DIM.value} "
             money = int(t["local_amount_cents"])
@@ -125,10 +128,13 @@ class Account:
 class Config:
     def __init__(self, input_str):
         json = loads(input_str)
-        self.certificates = {"qonto": json["certificates"].get("qonto")}
-        if any((c is not None and (not isinstance(c, str) and len(c) != 64)) for c in self.certificates):
-            raise Exception
-        self.accounts = [Account(a) for a in json["accounts"]]
+        self.certificates = {"qonto": json["certificates"].get("qonto").lower()}
+        if any(
+            (c is not None and (not isinstance(c, str) or len(c) != 64 or any(v not in "0123456789abcdef" for v in c)))
+            for c in self.certificates.values()
+        ):
+            raise Exception  # TODO Better
+        self.accounts = [Account(a, self.certificates["qonto"]) for a in json["accounts"]]
 
 
 def main():
@@ -138,8 +144,8 @@ def main():
     except Exception:
         return usage(wrong_config=True)
     # TODO : parameterize next 2 lines
-    # config.accounts[0].print_infos(config.certificates["qonto"])
-    config.accounts[0].print_transactions(config.certificates["qonto"])
+    # config.accounts[0].print_infos()
+    config.accounts[0].print_transactions()
     # TODO : set an invoice
     # TODO : parameters to limit year, show missing invoices only
     # TODO : show date of transaction
