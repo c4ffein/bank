@@ -21,7 +21,8 @@ from json import loads
 from pathlib import Path
 from pprint import pprint as pp
 
-Color = Enum("Color", [("RED", "\033[31m"), ("GREEN", "\033[32m"), ("DIM", "\033[34m"), ("WHITE", "\033[39m")])
+colors = {"RED": "31", "GREEN": "32", "PURP": "34", "DIM": "90", "WHITE": "39"}
+Color = Enum("Color", [(k, f"\033[{v}m") for k, v in colors.items()])
 COLOR_LEN = 4
 
 
@@ -114,12 +115,20 @@ class Account:
         url = b"/v2/transactions?bank_account_id="
         ts = get_body(self.endpoint, url + account_id, self.cert_checksum, authorization=self.auth_str)
         for t in ts["transactions"]:
-            label = f"{Color.WHITE.value}{t['label']}{Color.DIM.value} "
+            short_transaction_id = f" {t['transaction_id'][-6:]} "
+            label = f"{Color.WHITE.value} {t['label']}{Color.DIM.value} "
             money = int(t["local_amount_cents"])
             money_str = Color.RED.value if t["side"] == "debit" else Color.GREEN.value
-            money_str += f" {'-' if t['side'] == 'debit' else '+'}{money // 100},{str(money % 100).zfill(2)}"
+            money_str += f" {'-' if t['side'] == 'debit' else '+'}{money // 100},{str(money % 100).zfill(2)} "
+            emitted_at = f" {t['emitted_at'][:10]}"
             print(
-                f"{Color.DIM.value}- {label.ljust(60 + COLOR_LEN * 2, '-')}{money_str.rjust(11 + COLOR_LEN, '-')}"
+                f"{Color.DIM.value}-"
+                f"{Color.PURP.value}{short_transaction_id}"
+                f"{Color.DIM.value}-"
+                f"{label.ljust(60 + COLOR_LEN * 2, '-')}"
+                f"{money_str.rjust(16 + COLOR_LEN, '-')}"
+                f"{Color.DIM.value}-"
+                f"{Color.PURP.value}{emitted_at}"
             )  # TODO : local_amount vs amount?
         pp(ts["transactions"][0])
         pp(ts["meta"])  # TODO : Handle this, show all year through iteration, param to set min/max page?..
