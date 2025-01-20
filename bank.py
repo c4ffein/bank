@@ -116,7 +116,7 @@ class Account:
         # TODO: Parameterize - no need to lock if clean overwrite
         try:
             with (Path.home() / ".config" / "bank" / "DIRTYCACHE.json").open() as f:
-                return json.loads(f.read())
+                return loads(f.read())
         except Exception:
             return {}
 
@@ -125,6 +125,23 @@ class Account:
         new_cache = {**self.get_transaction_cache(), **{t["transaction_id"]: t for t in obtained_transactions}}
         with (Path.home() / ".config" / "bank" / "DIRTYCACHE.json").open("w") as f:
             f.write(dumps(new_cache))
+
+    def get_full_transactions(self, partial_id):
+        return [v for k, v in self.get_transaction_cache().items() if k.endswith(partial_id)]
+
+    def get_one_transaction(self, partial_id):
+        transactions = self.get_full_transactions(partial_id)
+        if len(transactions) == 0:
+            raise Exception("No transaction found")  # TODO: Better
+        if len(transactions) > 1:
+            raise Exception("More than one transaction found")  # TODO: Better
+        return transactions[0]
+
+    def show(self, partial_id):
+        pp(self.get_one_transaction(partial_id))
+
+    def justify(self, partial_id, file):
+        pp(self.get_one_transaction(partial_id))  # TODO: Actually justify here
 
     def print_transactions(self, attachments=None):
         self.get_infos()
@@ -154,8 +171,8 @@ class Account:
                 f"{Color.DIM.value}-"
                 f"{Color.PURP.value}{emitted_at}"
             )  # TODO : local_amount vs amount?
-        pp(ts["transactions"][0])
-        pp(ts["meta"])  # TODO : Handle this, show all year through iteration, param to set min/max page?..
+        meta_gen = (f"{Color.PURP.value}{k}{Color.DIM.value}={Color.WHITE.value}{v}" for k, v in ts["meta"].items())
+        print("", f"{Color.DIM.value} - ".join(meta_gen))
 
     def find_transaction(self, partial_id):
         pass  # TODO : Only accept partal_id from previously shown ids
@@ -197,11 +214,14 @@ def main():
         # TODO: parameters to limit year, show missing invoices only
         # TODO: year<2024 / year<=2024 / year=2024 etc
         # TODO: missing=True / missing=true / missing=y
+    if argv[1] == "show":
+        if len(argv) != 3:
+            return usage()
+        return config.accounts[0].show(argv[2])
     if argv[1] == "justify":
         if len(argv) != 4:
             return usage()
-        transaction_id = config.accounts[0].find_transaction(argv[2])
-        config.accounts[0].print_transactions()  # TODO : set an invoice
+        return config.accounts[0].justify(argv[2], None)  # TODO : set an invoice
     return usage()
 
 
