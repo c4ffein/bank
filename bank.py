@@ -10,6 +10,8 @@ TODOs and possible improvements:
 - use classes to deserialize http responses
 - cleaner certificate pinning: instead of rewriting http, implement certificate-pinning through a custom sslcontext
   - then, you can just pass this sslcontext to regular libs... not sure it's the way to go though
+- Let select a specific account instead of the first one - in the account list from the config
+- Let select a specific account instead of the first one - in the account list from the selected remote account
 """
 
 import socket
@@ -17,9 +19,10 @@ import ssl
 from enum import Enum
 from hashlib import sha256
 from http.client import HTTPResponse
-from json import loads
+from json import dumps, loads
 from pathlib import Path
 from pprint import pprint as pp
+from sys import argv
 
 colors = {"RED": "31", "GREEN": "32", "PURP": "34", "DIM": "90", "WHITE": "39"}
 Color = Enum("Color", [(k, f"\033[{v}m") for k, v in colors.items()])
@@ -106,14 +109,35 @@ class Account:
         )
 
     def print_infos(self):
+        self.get_infos()
         pp(self.account_infos)
 
-    def print_transactions(self):
+    def get_transaction_cache(self):
+        # TODO: Parameterize - no need to lock if clean overwrite
+        try:
+            with (Path.home() / ".config" / "bank" / "DIRTYCACHE.json").open() as f:
+                return json.loads(f.read())
+        except Exception:
+            return {}
+
+    def save_transaction_cache(self, obtained_transactions):
+        # TODO: Parameterize / lock / better overwrite
+        new_cache = {**self.get_transaction_cache(), **{t["transaction_id"]: t for t in obtained_transactions}}
+        with (Path.home() / ".config" / "bank" / "DIRTYCACHE.json").open("w") as f:
+            f.write(dumps(new_cache))
+
+    def print_transactions(self, attachments=None):
         self.get_infos()
         account_id = str.encode(self.account_infos["organization"]["bank_accounts"][0]["id"])
-        assert len(account_id) == 36 and all(chr(c) in "0123456789abcdef-" for c in account_id)
-        url = b"/v2/transactions?bank_account_id="
+        assert len(account_id) == 36 and all(chr(c) in "0123456789abcdef-" for c in account_id)  # TODO real exception
+        with_attachments_query = (
+            b"with_attachments=" + (b"true" if attachments else b"false") + b"&"
+            if attachments
+            else b""
+        )
+        url = b"/v2/transactions?" + with_attachments_query + b"bank_account_id="
         ts = get_body(self.endpoint, url + account_id, self.cert_checksum, authorization=self.auth_str)
+        self.save_transaction_cache(ts["transactions"])
         for t in ts["transactions"]:
             short_transaction_id = f" {t['transaction_id'][-6:]} "
             label = f"{Color.WHITE.value} {t['label']}{Color.DIM.value} "
@@ -133,6 +157,9 @@ class Account:
         pp(ts["transactions"][0])
         pp(ts["meta"])  # TODO : Handle this, show all year through iteration, param to set min/max page?..
 
+    def find_transaction(self, partial_id):
+        pass  # TODO : Only accept partal_id from previously shown ids
+
 
 class Config:
     def __init__(self, input_str):
@@ -146,18 +173,36 @@ class Config:
         self.accounts = [Account(a, self.certificates["qonto"]) for a in json["accounts"]]
 
 
+def consume_subparameters(allowed_parameters, parameters):
+    unknown_parameters = [
+        parameter
+        for parameter in parameters
+        if not any(parameter.startswith(p) for p in allowed_parameters)
+    ]
+    r = {}
+
+
 def main():
     try:
         with (Path.home() / ".config" / "bank" / "config.json").open() as f:
             config = Config(f.read())
     except Exception:
         return usage(wrong_config=True)
-    # TODO : parameterize next 2 lines
-    # config.accounts[0].print_infos()
-    config.accounts[0].print_transactions()
-    # TODO : set an invoice
-    # TODO : parameters to limit year, show missing invoices only
-    # TODO : show date of transaction
+    if len(argv) < 2 or argv[1] == "accounts":
+        return config.accounts[0].print_infos()
+    if argv[1] == "transactions":
+        if "no-invoice" in argv[2:]:
+            return config.accounts[0].print_transactions(attachments=False)  # TODO: Better obviously
+        return config.accounts[0].print_transactions()
+        # TODO: parameters to limit year, show missing invoices only
+        # TODO: year<2024 / year<=2024 / year=2024 etc
+        # TODO: missing=True / missing=true / missing=y
+    if argv[1] == "justify":
+        if len(argv) != 4:
+            return usage()
+        transaction_id = config.accounts[0].find_transaction(argv[2])
+        config.accounts[0].print_transactions()  # TODO : set an invoice
+    return usage()
 
 
 if __name__ == "__main__":
