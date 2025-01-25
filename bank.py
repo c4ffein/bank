@@ -22,53 +22,94 @@ from http.client import HTTPResponse
 from json import dumps, loads
 from pathlib import Path
 from pprint import pprint as pp
+from urllib.request import urlopen, Request
+from ssl import Purpose, SSLContext, SSLSocket, _ASN1Object, PROTOCOL_TLS_CLIENT, CERT_REQUIRED, _ssl, CERT_NONE
 from sys import argv
-
+import os
 colors = {"RED": "31", "GREEN": "32", "PURP": "34", "DIM": "90", "WHITE": "39"}
 Color = Enum("Color", [(k, f"\033[{v}m") for k, v in colors.items()])
 COLOR_LEN = 4
 
 
-def custom_socket(addr, url, cert_checksum):
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.settimeout(1)
-    wrapped_socket = ssl.create_default_context().wrap_socket(sock, server_hostname=addr)
-    try:
-        wrapped_socket.connect((addr, 443))
-    except Exception:
-        return None  # TODO : Better handling
-    der_cert_bin = wrapped_socket.getpeercert(True)
-    if sha256(der_cert_bin).hexdigest() != cert_checksum:  # TODO : Check this is enough
-        raise Exception("Incorrect certificate checksum")
-    return wrapped_socket
+# TODO : UT to ensure the checks are called for any python version
+# TODO : UT to ensure those works if we create 2 contexts with 2 different certificatesa
+# TODO : UT to ensure check is called if already opened socket gets wrapped
+# TODO : UT to ensure check is called if connecting on new socket
+# TODO : Ensure called with correct params, so that regular verif, and so getpeercert is enough
+def make_pinned_ssl_context(pinned_sha_256):
 
+    class PinnedSSLSocket(SSLSocket):
+        def check_pinned_cert(self):
+            der_cert_bin = self.getpeercert(True)
+            if sha256(der_cert_bin).hexdigest() != pinned_sha_256:  # TODO : Check this is enough
+                raise Exception("Incorrect certificate checksum")  # TODO : Better
 
-def get(addr, url, cert_checksum, user_agent=None, authorization=None, json=False):
-    sock = custom_socket(addr, url, cert_checksum)
-    if sock is None:
-        raise Exception("Unable to open socket")  # TODO : Better
-    request_header = b"GET " + url + b" HTTP/1.0\r\nHost: " + addr
-    request_header += b"\r\nUser-Agent: " + user_agent if user_agent else b""
-    request_header += b"\r\nAuthorization: " + authorization if authorization else b""
-    request_header += b"\r\n\r\n"
-    sock.send(request_header)
-    response = HTTPResponse(sock)
-    response.begin()
-    if json:
-        pass  # TODO : Parse the Content-Type and decode depending of charset.
-        # TODO : Don't try to implement this. See the top TODO for what to implement instead of this. Unless...
-        # if response.getheader("Content-Type") != "application/json; charset=utf-8":
-        #    raise Exception("Content-Type isn't application/json; charset=utf-8")
-        # if response.getheader("Content-Type") != "application/json":
-        #    raise Exception("Content-Type isn't application/json")
-    body = response.read()
-    sock.close()
-    return response, body
+        def connect(self, addr):  # Needed for when the context creates a new connection
+            r = super().connect(addr)
+            self.check_pinned_cert()
+            return r
+
+        def connect_ex(self, addr):  # Needed for when the context creates a new connection
+            r = super().connect_ex(addr)
+            self.check_pinned_cert()
+            return r
+
+    class PinnedSSLContext(SSLContext):
+        sslsocket_class = PinnedSSLSocket
+
+        def wrap_socket(  # Needed for when we wrap an exising socket
+            self,
+            sock,
+            server_side=False,
+            do_handshake_on_connect=True,
+            suppress_ragged_eofs=True,
+            server_hostname=None,
+            session=None
+        ):
+            ws = super().wrap_socket(
+                sock,
+                server_side=server_side,
+                do_handshake_on_connect=do_handshake_on_connect,
+                suppress_ragged_eofs=suppress_ragged_eofs,
+                server_hostname=server_hostname,
+                session=session
+            )
+            ws.check_pinned_cert()
+            return ws
+
+    def create_pinned_default_context(purpose=Purpose.SERVER_AUTH, *, cafile=None, capath=None, cadata=None):
+        if not isinstance(purpose, _ASN1Object):
+            raise TypeError(purpose)
+        if purpose == Purpose.SERVER_AUTH:  # Verify certs and host name in client mode
+            context = PinnedSSLContext(PROTOCOL_TLS_CLIENT)
+            context.verify_mode, context.check_hostname = CERT_REQUIRED, True
+        elif purpose == Purpose.CLIENT_AUTH:
+            context = PinnedSSLContext(PROTOCOL_TLS_SERVER)
+        else:
+            raise ValueError(purpose)
+        context.verify_flags |= _ssl.VERIFY_X509_STRICT
+        if cafile or capath or cadata:
+            context.load_verify_locations(cafile, capath, cadata)
+        elif context.verify_mode != CERT_NONE:
+            context.load_default_certs(purpose)  # Try loading default system root CA certificates, this may fail silently.
+        if hasattr(context, 'keylog_filename'):  # OpenSSL 1.1.1 keylog file
+            keylogfile = os.environ.get('SSLKEYLOGFILE')
+            if keylogfile and not sys.flags.ignore_environment:
+                context.keylog_filename = keylogfile
+        return context
+
+    return create_pinned_default_context()
+
 
 
 def get_body(addr, url, cert_checksum, user_agent=None, authorization=None, json=True):
-    r = get(addr, url, cert_checksum, user_agent=user_agent, authorization=authorization, json=json)[1]
-    return loads(r) if json else r
+    context = make_pinned_ssl_context(cert_checksum)
+    headers = {
+        "User-Agent": "",  # Otherwise would send default User-Agent, that does fail
+        **({"Authorization": str(authorization)[2:-1]} if authorization is not None else {}),
+    }
+    r = urlopen(Request("https://" + (addr+url).decode(), None, headers=headers), context=context)
+    return loads(r.read()) if json else r.read()  # TODO : json is not a param, populate if type?..
 
 
 def usage(wrong_config=False, wrong_command=False, wrong_arg_len=False):
@@ -221,6 +262,8 @@ def main():
     if argv[1] == "justify":
         if len(argv) != 4:
             return usage()
+        with open(argv[3], "rb") as f:
+            file = f.read()
         return config.accounts[0].justify(argv[2], None)  # TODO : set an invoice
     return usage()
 
