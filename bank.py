@@ -12,23 +12,62 @@ TODOs and possible improvements:
   - then, you can just pass this sslcontext to regular libs... not sure it's the way to go though
 - Let select a specific account instead of the first one - in the account list from the config
 - Let select a specific account instead of the first one - in the account list from the selected remote account
+- Shows money in euros and not foreign currency
 """
 
+import mimetypes
 import socket
 import ssl
+from binascii import hexlify
 from enum import Enum
 from hashlib import sha256
 from http.client import HTTPResponse
+from io import BytesIO, StringIO
+from itertools import chain
 from json import dumps, loads
 from pathlib import Path
 from pprint import pprint as pp
 from urllib.request import urlopen, Request
+from uuid import uuid4
 from ssl import Purpose, SSLContext, SSLSocket, _ASN1Object, PROTOCOL_TLS_CLIENT, CERT_REQUIRED, _ssl, CERT_NONE
 from sys import argv
 import os
+
+
 colors = {"RED": "31", "GREEN": "32", "PURP": "34", "DIM": "90", "WHITE": "39"}
 Color = Enum("Color", [(k, f"\033[{v}m") for k, v in colors.items()])
 COLOR_LEN = 4
+
+
+class MultiPartForm(object):
+    def __init__(self):
+        self.form_fields = []
+        self.files = []
+        self.boundary = hexlify(os.urandom(16))
+
+    def add_field(self, name, value):
+        self.form_fields.append((name, value))
+
+    def add_file(self, fieldname, filename, file_handle, mimetype=None):
+        body = file_handle.read()
+        mimetype = (mimetypes.guess_type(filename)[0] or "application/octet-stream") if mimetype is None else mimetypes
+        self.files.append((fieldname, filename, mimetype, body))
+
+    def __bytes__(self):
+        part_boundary = b"--" + self.boundary
+        gen_content_disposition = lambda field_name, file_name: (
+            f'Content-Disposition: form-data; name="{field_name}"; filename="{file_name}"'.encode(encoding="ascii")
+        )
+        gen_content_type = lambda content_type: f"Content-Type: {content_type}".encode(encoding="ascii")
+        forms_to_add = (
+            [part_boundary, f'Content-Disposition: form-data; name="{name}"'.encode(encoding="ascii"), b"", value]
+            for name, value in self.form_fields
+        )
+        files_to_add = (
+            [part_boundary, gen_content_disposition(field_name, file_name), gen_content_type(content_type), b"", body]
+            for field_name, file_name, content_type, body in self.files
+        )
+        return b"\r\n".join([*chain(*(chain(forms_to_add, files_to_add))), b"--" + self.boundary + b"--", b""])
 
 
 # TODO : UT to ensure the checks are called for any python version
@@ -92,8 +131,8 @@ def make_pinned_ssl_context(pinned_sha_256):
             context.load_verify_locations(cafile, capath, cadata)
         elif context.verify_mode != CERT_NONE:
             context.load_default_certs(purpose)  # Try loading default system root CA certificates, this may fail silently.
-        if hasattr(context, 'keylog_filename'):  # OpenSSL 1.1.1 keylog file
-            keylogfile = os.environ.get('SSLKEYLOGFILE')
+        if hasattr(context, "keylog_filename"):  # OpenSSL 1.1.1 keylog file
+            keylogfile = os.environ.get("SSLKEYLOGFILE")
             if keylogfile and not sys.flags.ignore_environment:
                 context.keylog_filename = keylogfile
         return context
@@ -111,6 +150,21 @@ def get_body(addr, url, cert_checksum, user_agent=None, authorization=None, json
     r = urlopen(Request("https://" + (addr+url).decode(), None, headers=headers), context=context)
     return loads(r.read()) if json else r.read()  # TODO : json is not a param, populate if type?..
 
+def post_body(addr, url, file_bytes, cert_checksum, user_agent=None, authorization=None, json=True, additional_headers=None):
+    context = make_pinned_ssl_context(cert_checksum)
+    form = MultiPartForm()
+    form.add_file("file", "file.pdf", file_handle=BytesIO(file_bytes))
+    body = bytes(form)
+    headers = {
+        "User-Agent": "",  # Otherwise would send default User-Agent, that does fail
+        "Content-Type": f"multipart/form-data; boundary={form.boundary.decode()}",  # Needed for file upload
+        #"X-Qonto-Idempotency-Key": str(uuid4()),  # TODO : param this
+        **({"Authorization": str(authorization)[2:-1]} if authorization is not None else {}),
+        **(additional_headers or {}),
+    }
+    request = Request("https://" + (addr+url).decode(), body, headers=headers)
+    r = urlopen(request, context=context)  # TODO: data doesnt work?
+    return loads(r.read()) if json else r.read()  # TODO : json is not a param, populate if type?..
 
 def usage(wrong_config=False, wrong_command=False, wrong_arg_len=False):
     output_lines = [
@@ -181,8 +235,25 @@ class Account:
     def show(self, partial_id):
         pp(self.get_one_transaction(partial_id))
 
+    def show_attachments(self, transaction_id):
+        url = b"/v2/transactions/"+transaction_id.encode()+b"/attachments"
+        pp(get_body(self.endpoint, url, self.cert_checksum, authorization=self.auth_str))
+
     def justify(self, partial_id, file):
-        pp(self.get_one_transaction(partial_id))  # TODO: Actually justify here
+        transaction = self.get_one_transaction(partial_id)
+        idempo = str(uuid4())
+        print(f"Idempotent id: {idempo}")
+        try:
+            r = post_body(
+                self.endpoint, b"/v2/transactions/"+transaction["id"].encode()+b"/attachments",
+                file, self.cert_checksum, authorization=self.auth_str,
+                additional_headers={"X-Qonto-Idempotency-Key": idempo}  # TODO : consume this
+            )
+        except Exception as e:
+            import pdb; pdb.set_trace()
+            raise
+        assert r == {}  # TODO Better
+        # TODO NOW USE IDEMPOTENCY, CLEAN CODE, SHOW ID
 
     def print_transactions(self, attachments=None):
         self.get_infos()
@@ -190,7 +261,7 @@ class Account:
         assert len(account_id) == 36 and all(chr(c) in "0123456789abcdef-" for c in account_id)  # TODO real exception
         with_attachments_query = (
             b"with_attachments=" + (b"true" if attachments else b"false") + b"&"
-            if attachments
+            if attachments is not None
             else b""
         )
         url = b"/v2/transactions?" + with_attachments_query + b"bank_account_id="
@@ -259,12 +330,16 @@ def main():
         if len(argv) != 3:
             return usage()
         return config.accounts[0].show(argv[2])
+    if argv[1] == "show-attachments":
+        if len(argv) != 3:
+            return usage()
+        return config.accounts[0].show_attachments(argv[2])
     if argv[1] == "justify":
         if len(argv) != 4:
             return usage()
         with open(argv[3], "rb") as f:
             file = f.read()
-        return config.accounts[0].justify(argv[2], None)  # TODO : set an invoice
+        return config.accounts[0].justify(argv[2], file)
     return usage()
 
 
