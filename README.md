@@ -1,5 +1,5 @@
-# sm
-KISS Python Simple Mail client
+# bank
+KISS banking Client
 
 ## WARNING
 **I don't recommand using this as-is.** This a PoC, usable by me because I know what I want to do with it.
