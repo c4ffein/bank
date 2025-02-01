@@ -16,30 +16,26 @@ TODOs and possible improvements:
 """
 
 import mimetypes
-import socket
-import ssl
+import os
 from binascii import hexlify
 from enum import Enum
 from hashlib import sha256
-from http.client import HTTPResponse
-from io import BytesIO, StringIO
+from io import BytesIO
 from itertools import chain
 from json import dumps, loads
 from pathlib import Path
 from pprint import pprint as pp
-from urllib.request import urlopen, Request
-from uuid import uuid4
-from ssl import Purpose, SSLContext, SSLSocket, _ASN1Object, PROTOCOL_TLS_CLIENT, CERT_REQUIRED, _ssl, CERT_NONE
+from ssl import CERT_NONE, CERT_REQUIRED, PROTOCOL_TLS_CLIENT, Purpose, SSLContext, SSLSocket, _ASN1Object, _ssl
 from sys import argv
-import os
-
+from urllib.request import Request, urlopen
+from uuid import uuid4
 
 colors = {"RED": "31", "GREEN": "32", "PURP": "34", "DIM": "90", "WHITE": "39"}
 Color = Enum("Color", [(k, f"\033[{v}m") for k, v in colors.items()])
 COLOR_LEN = 4
 
 
-class MultiPartForm(object):
+class MultiPartForm:
     def __init__(self):
         self.form_fields = []
         self.files = []
@@ -76,7 +72,6 @@ class MultiPartForm(object):
 # TODO : UT to ensure check is called if connecting on new socket
 # TODO : Ensure called with correct params, so that regular verif, and so getpeercert is enough
 def make_pinned_ssl_context(pinned_sha_256):
-
     class PinnedSSLSocket(SSLSocket):
         def check_pinned_cert(self):
             der_cert_bin = self.getpeercert(True)
@@ -103,7 +98,7 @@ def make_pinned_ssl_context(pinned_sha_256):
             do_handshake_on_connect=True,
             suppress_ragged_eofs=True,
             server_hostname=None,
-            session=None
+            session=None,
         ):
             ws = super().wrap_socket(
                 sock,
@@ -111,7 +106,7 @@ def make_pinned_ssl_context(pinned_sha_256):
                 do_handshake_on_connect=do_handshake_on_connect,
                 suppress_ragged_eofs=suppress_ragged_eofs,
                 server_hostname=server_hostname,
-                session=session
+                session=session,
             )
             ws.check_pinned_cert()
             return ws
@@ -130,7 +125,9 @@ def make_pinned_ssl_context(pinned_sha_256):
         if cafile or capath or cadata:
             context.load_verify_locations(cafile, capath, cadata)
         elif context.verify_mode != CERT_NONE:
-            context.load_default_certs(purpose)  # Try loading default system root CA certificates, this may fail silently.
+            context.load_default_certs(
+                purpose
+            )  # Try loading default system root CA certificates, this may fail silently.
         if hasattr(context, "keylog_filename"):  # OpenSSL 1.1.1 keylog file
             keylogfile = os.environ.get("SSLKEYLOGFILE")
             if keylogfile and not sys.flags.ignore_environment:
@@ -140,17 +137,19 @@ def make_pinned_ssl_context(pinned_sha_256):
     return create_pinned_default_context()
 
 
-
 def get_body(addr, url, cert_checksum, user_agent=None, authorization=None, json=True):
     context = make_pinned_ssl_context(cert_checksum)
     headers = {
         "User-Agent": "",  # Otherwise would send default User-Agent, that does fail
         **({"Authorization": str(authorization)[2:-1]} if authorization is not None else {}),
     }
-    r = urlopen(Request("https://" + (addr+url).decode(), None, headers=headers), context=context)
+    r = urlopen(Request("https://" + (addr + url).decode(), None, headers=headers), context=context)
     return loads(r.read()) if json else r.read()  # TODO : json is not a param, populate if type?..
 
-def post_body(addr, url, file_bytes, cert_checksum, user_agent=None, authorization=None, json=True, additional_headers=None):
+
+def post_body(
+    addr, url, file_bytes, cert_checksum, user_agent=None, authorization=None, json=True, additional_headers=None
+):
     context = make_pinned_ssl_context(cert_checksum)
     form = MultiPartForm()
     form.add_file("file", "file.pdf", file_handle=BytesIO(file_bytes))
@@ -158,13 +157,14 @@ def post_body(addr, url, file_bytes, cert_checksum, user_agent=None, authorizati
     headers = {
         "User-Agent": "",  # Otherwise would send default User-Agent, that does fail
         "Content-Type": f"multipart/form-data; boundary={form.boundary.decode()}",  # Needed for file upload
-        #"X-Qonto-Idempotency-Key": str(uuid4()),  # TODO : param this
+        # "X-Qonto-Idempotency-Key": str(uuid4()),  # TODO : param this
         **({"Authorization": str(authorization)[2:-1]} if authorization is not None else {}),
         **(additional_headers or {}),
     }
-    request = Request("https://" + (addr+url).decode(), body, headers=headers)
+    request = Request("https://" + (addr + url).decode(), body, headers=headers)
     r = urlopen(request, context=context)  # TODO: data doesnt work?
     return loads(r.read()) if json else r.read()  # TODO : json is not a param, populate if type?..
+
 
 def usage(wrong_config=False, wrong_command=False, wrong_arg_len=False):
     output_lines = [
@@ -236,7 +236,7 @@ class Account:
         pp(self.get_one_transaction(partial_id))
 
     def show_attachments(self, transaction_id):
-        url = b"/v2/transactions/"+transaction_id.encode()+b"/attachments"
+        url = b"/v2/transactions/" + transaction_id.encode() + b"/attachments"
         pp(get_body(self.endpoint, url, self.cert_checksum, authorization=self.auth_str))
 
     def justify(self, partial_id, file):
@@ -245,12 +245,14 @@ class Account:
         print(f"Idempotent id: {idempo}")
         try:
             r = post_body(
-                self.endpoint, b"/v2/transactions/"+transaction["id"].encode()+b"/attachments",
-                file, self.cert_checksum, authorization=self.auth_str,
-                additional_headers={"X-Qonto-Idempotency-Key": idempo}  # TODO : consume this
+                self.endpoint,
+                b"/v2/transactions/" + transaction["id"].encode() + b"/attachments",
+                file,
+                self.cert_checksum,
+                authorization=self.auth_str,
+                additional_headers={"X-Qonto-Idempotency-Key": idempo},  # TODO : consume this
             )
-        except Exception as e:
-            import pdb; pdb.set_trace()
+        except Exception:
             raise
         assert r == {}  # TODO Better
         # TODO NOW USE IDEMPOTENCY, CLEAN CODE, SHOW ID
@@ -260,9 +262,7 @@ class Account:
         account_id = str.encode(self.account_infos["organization"]["bank_accounts"][0]["id"])
         assert len(account_id) == 36 and all(chr(c) in "0123456789abcdef-" for c in account_id)  # TODO real exception
         with_attachments_query = (
-            b"with_attachments=" + (b"true" if attachments else b"false") + b"&"
-            if attachments is not None
-            else b""
+            b"with_attachments=" + (b"true" if attachments else b"false") + b"&" if attachments is not None else b""
         )
         url = b"/v2/transactions?" + with_attachments_query + b"bank_account_id="
         ts = get_body(self.endpoint, url + account_id, self.cert_checksum, authorization=self.auth_str)
@@ -304,9 +304,7 @@ class Config:
 
 def consume_subparameters(allowed_parameters, parameters):
     unknown_parameters = [
-        parameter
-        for parameter in parameters
-        if not any(parameter.startswith(p) for p in allowed_parameters)
+        parameter for parameter in parameters if not any(parameter.startswith(p) for p in allowed_parameters)
     ]
     r = {}
 
