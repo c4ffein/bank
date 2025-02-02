@@ -36,7 +36,7 @@ from ssl import (
     _ASN1Object,
     _ssl,
 )
-from sys import argv
+from sys import argv, exit
 from sys import flags as sys_flags
 from urllib.request import Request, urlopen
 from uuid import uuid4
@@ -144,6 +144,10 @@ def make_pinned_ssl_context(pinned_sha_256):
     return create_pinned_default_context()
 
 
+class BankException(Exception):
+    pass
+
+
 def get_body(addr, url, cert_checksum, user_agent=None, authorization=None, json=True):
     context = make_pinned_ssl_context(cert_checksum)
     headers = {
@@ -237,9 +241,9 @@ class Account:
     def get_one_transaction(self, partial_id):
         transactions = self.get_full_transactions(partial_id)
         if len(transactions) == 0:
-            raise Exception("No transaction found")  # TODO: Better
+            raise BankException("No transaction found")  # TODO: Better
         if len(transactions) > 1:
-            raise Exception("More than one transaction found")  # TODO: Better
+            raise BankException("More than one transaction found")  # TODO: Better
         return transactions[0]
 
     def show(self, partial_id):
@@ -350,4 +354,10 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except BankException as e:
+        print(f"{Color.RED.value}\n  !!  {e}  !!  \n")
+        exit(-1)
+    except Exception:
+        raise
