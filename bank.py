@@ -25,8 +25,19 @@ from itertools import chain
 from json import dumps, loads
 from pathlib import Path
 from pprint import pprint as pp
-from ssl import CERT_NONE, CERT_REQUIRED, PROTOCOL_TLS_CLIENT, PROTOCOL_TLS_SERVER, Purpose, SSLContext, SSLSocket, _ASN1Object, _ssl
-from sys import argv, flags as sys_flags
+from ssl import (
+    CERT_NONE,
+    CERT_REQUIRED,
+    PROTOCOL_TLS_CLIENT,
+    PROTOCOL_TLS_SERVER,
+    Purpose,
+    SSLContext,
+    SSLSocket,
+    _ASN1Object,
+    _ssl,
+)
+from sys import argv
+from sys import flags as sys_flags
 from urllib.request import Request, urlopen
 from uuid import uuid4
 
