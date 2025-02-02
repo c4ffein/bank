@@ -63,3 +63,6 @@ lint.select = [
     "W",    # pycodestyle warnings
 ]
 line-length = 120
+
+[tool.ruff.lint.per-file-ignores]
+"bank.py" = ["C901", "E731"]  # No complexity check, allow lambda definition

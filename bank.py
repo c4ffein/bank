@@ -25,8 +25,8 @@ from itertools import chain
 from json import dumps, loads
 from pathlib import Path
 from pprint import pprint as pp
-from ssl import CERT_NONE, CERT_REQUIRED, PROTOCOL_TLS_CLIENT, Purpose, SSLContext, SSLSocket, _ASN1Object, _ssl
-from sys import argv
+from ssl import CERT_NONE, CERT_REQUIRED, PROTOCOL_TLS_CLIENT, PROTOCOL_TLS_SERVER, Purpose, SSLContext, SSLSocket, _ASN1Object, _ssl
+from sys import argv, flags as sys_flags
 from urllib.request import Request, urlopen
 from uuid import uuid4
 
@@ -44,23 +44,19 @@ class MultiPartForm:
     def add_field(self, name, value):
         self.form_fields.append((name, value))
 
-    def add_file(self, fieldname, filename, file_handle, mimetype=None):
+    def add_file(self, field_name, file_name, file_handle, mimetype=None):
         body = file_handle.read()
-        mimetype = (mimetypes.guess_type(filename)[0] or "application/octet-stream") if mimetype is None else mimetypes
-        self.files.append((fieldname, filename, mimetype, body))
+        mimetype = (mimetypes.guess_type(file_name)[0] or "application/octet-stream") if mimetype is None else mimetypes
+        self.files.append((field_name, file_name, mimetype, body))
 
     def __bytes__(self):
         part_boundary = b"--" + self.boundary
-        gen_content_disposition = lambda field_name, file_name: (
-            f'Content-Disposition: form-data; name="{field_name}"; filename="{file_name}"'.encode(encoding="ascii")
-        )
+        gen_disposition = lambda name: f'Content-Disposition: form-data; name="{name}"'.encode(encoding="ascii")
+        gen_file = lambda field, file: gen_disposition(field) + f'; filename="{file}"'.encode(encoding="ascii")
         gen_content_type = lambda content_type: f"Content-Type: {content_type}".encode(encoding="ascii")
-        forms_to_add = (
-            [part_boundary, f'Content-Disposition: form-data; name="{name}"'.encode(encoding="ascii"), b"", value]
-            for name, value in self.form_fields
-        )
+        forms_to_add = ([part_boundary, gen_disposition(name), b"", value] for name, value in self.form_fields)
         files_to_add = (
-            [part_boundary, gen_content_disposition(field_name, file_name), gen_content_type(content_type), b"", body]
+            [part_boundary, gen_file(field_name, file_name), gen_content_type(content_type), b"", body]
             for field_name, file_name, content_type, body in self.files
         )
         return b"\r\n".join([*chain(*(chain(forms_to_add, files_to_add))), b"--" + self.boundary + b"--", b""])
@@ -130,7 +126,7 @@ def make_pinned_ssl_context(pinned_sha_256):
             )  # Try loading default system root CA certificates, this may fail silently.
         if hasattr(context, "keylog_filename"):  # OpenSSL 1.1.1 keylog file
             keylogfile = os.environ.get("SSLKEYLOGFILE")
-            if keylogfile and not sys.flags.ignore_environment:
+            if keylogfile and not sys_flags.ignore_environment:
                 context.keylog_filename = keylogfile
         return context
 
@@ -302,11 +298,12 @@ class Config:
         self.accounts = [Account(a, self.certificates["qonto"]) for a in json["accounts"]]
 
 
-def consume_subparameters(allowed_parameters, parameters):
-    unknown_parameters = [
-        parameter for parameter in parameters if not any(parameter.startswith(p) for p in allowed_parameters)
-    ]
-    r = {}
+# TODO implement or delete
+# def consume_subparameters(allowed_parameters, parameters):
+#     unknown_parameters = [
+#         parameter for parameter in parameters if not any(parameter.startswith(p) for p in allowed_parameters)
+#     ]
+#     r = {}
 
 
 def main():
@@ -335,7 +332,7 @@ def main():
     if argv[1] == "justify":
         if len(argv) != 4:
             return usage()
-        with open(argv[3], "rb") as f:
+        with Path(argv[3]).open("rb") as f:
             file = f.read()
         return config.accounts[0].justify(argv[2], file)
     return usage()
