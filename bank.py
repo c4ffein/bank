@@ -185,7 +185,10 @@ def usage(wrong_config=False, wrong_command=False, wrong_arg_len=False):
         '    "local_store_path": "XX"',
         "  - certificates = sha256sum of der_cert_bin",
         "=======================",
-        "- bank                   ==> list all",
+        "- bank                              ==> gives accounts infos",
+        "- bank transactions                 ==> list transactions for first account",
+        "  + no-invoice                      ==> only show transactions without an invoice",
+        "- bank justify end_of_id file_path  ==> add a file to a transaction by the end of its id",
         "=======================",
         "This should help you get files TODO",
     ]
@@ -292,9 +295,6 @@ class Account:
             )  # TODO : local_amount vs amount?
         meta_gen = (f"{Color.PURP.value}{k}{Color.DIM.value}={Color.WHITE.value}{v}" for k, v in ts["meta"].items())
         print("", f"{Color.DIM.value} - ".join(meta_gen))
-
-    def find_transaction(self, partial_id):
-        pass  # TODO : Only accept partal_id from previously shown ids
 
 
 class Config:
