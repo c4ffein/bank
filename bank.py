@@ -179,7 +179,7 @@ def post_body(
 
 def usage(wrong_config=False, wrong_command=False, wrong_arg_len=False):
     output_lines = [
-        "bank - KISS banking client"
+        "bank - KISS banking client",
         # TODO
         "==========================",
         """~/.config/bank/config.json => {"accounts": [ACCOUNT_INFOS, ...], "certificates": {"qonto": "..."]}"""
