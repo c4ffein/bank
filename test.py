@@ -1,6 +1,7 @@
 from unittest import TestCase
 from unittest import main as unittest_main
 
+
 class PinnedSSLTest(TestCase):
     def test_the_checks_are_called_for_any_python_version(self):
         raise Exception("TODO")
