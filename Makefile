@@ -5,7 +5,7 @@ lint-check:
 	ruff check --no-fix && ruff format --check
 
 test:
-	python3 test.py  # Sike
+	python3 test.py
 
 install-build-system:
 	python3 -m pip install --upgrade build
