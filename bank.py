@@ -127,9 +127,7 @@ def make_pinned_ssl_context(pinned_sha_256):
         if cafile or capath or cadata:
             context.load_verify_locations(cafile, capath, cadata)
         elif context.verify_mode != CERT_NONE:
-            context.load_default_certs(
-                purpose
-            )  # Try loading default system root CA certificates, this may fail silently.
+            context.load_default_certs(purpose)  # Try loading default system root CA certificates, may fail silently
         if hasattr(context, "keylog_filename"):  # OpenSSL 1.1.1 keylog file
             keylogfile = os.environ.get("SSLKEYLOGFILE")
             if keylogfile and not sys_flags.ignore_environment:
@@ -235,10 +233,8 @@ class Account:
 
     def get_one_transaction(self, partial_id):
         transactions = self.get_full_transactions(partial_id)
-        if len(transactions) == 0:
-            raise BankException("No transaction found")  # TODO: Better
-        if len(transactions) > 1:
-            raise BankException("More than one transaction found")  # TODO: Better
+        if len(transactions) != 1:
+            raise BankException("More than one transaction found" if len(transactions) else "No transaction found")
         return transactions[0]
 
     def show(self, partial_id):
