@@ -73,7 +73,7 @@ class MultiPartForm:
         return b"\r\n".join([*chain(*(chain(forms_to_add, files_to_add))), b"--" + self.boundary + b"--", b""])
 
 
-def make_pinned_ssl_context(pinned_sha_256):
+def make_pinned_ssl_context(pinned_sha_256):  # TODO : Update
     class PinnedSSLSocket(SSLSocket):
         def check_pinned_cert(self):
             der_cert_bin = self.getpeercert(True)
