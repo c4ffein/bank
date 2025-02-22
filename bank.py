@@ -47,7 +47,7 @@ Color = Enum("Color", [(k, f"\033[{v}m") for k, v in colors.items()])
 COLOR_LEN = 4
 
 
-class MultiPartForm:
+class MultiPartForm:  # TODO : Use from python snippets
     def __init__(self):
         self.form_fields = []
         self.files = []
