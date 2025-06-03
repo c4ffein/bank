@@ -47,6 +47,9 @@ Color = Enum("Color", [(k, f"\033[{v}m") for k, v in colors.items()])
 COLOR_LEN = 4
 
 
+TITLE = "bank - KISS banking client"
+
+
 class MultiPartForm:  # TODO : Use from python snippets
     def __init__(self):
         self.form_fields = []
@@ -155,16 +158,16 @@ def post_body(
 
 def usage(wrong_config=False, wrong_command=False, wrong_arg_len=False):
     output_lines = [
-        "bank - KISS banking client",
+        TITLE,
         # TODO
-        "==========================",
+        "=" * len(TITLE),
         """~/.config/bank/config.json => {"accounts": [ACCOUNT_INFOS, ...], "certificates": {"qonto": "..."]}"""
         "  - ACCOUNT_INFOS = {",
         '    "id": "name-XXXX"',
         '    "secret_key": "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"',
         '    "local_store_path": "XX"',
         "  - certificates = sha256sum of der_cert_bin",
-        "=======================",
+        "==========================",
         "- bank                              ==> gives accounts infos",
         "- bank transactions                 ==> list transactions for first account",
         "  + no-invoice                      ==> only show transactions without an invoice",
@@ -193,9 +196,16 @@ class Account:
             self.endpoint, b"/v2/organization", self.cert_checksum, authorization=self.auth_str
         )
 
+    def _subinfos_str(self, infos, level, last_key):
+        if isinstance(infos, dict):
+            return "".join(f"\n{' ' * level * 2}{k}{self._subinfos_str(v, level + 1, k)}" for k, v in infos.items())
+        if isinstance(infos, list):
+            return "".join(f"\n{' ' * level * 2}#{i}{self._subinfos_str(v, level + 1, i)}" for i, v in enumerate(infos))
+        return f" {Color.DIM.value}{'=' * (34 - level * 2 - len(str(last_key)))}{Color.WHITE.value} {infos}"
+
     def print_infos(self):
         self.get_infos()
-        pp(self.account_infos)
+        print(f"{TITLE}\n{'=' * len(TITLE)}{self._subinfos_str(self.account_infos, 0, None)}")
 
     def get_transaction_cache(self):
         # TODO: Parameterize - no need to lock if clean overwrite
