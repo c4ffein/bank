@@ -207,7 +207,7 @@ class Account:
 
     def print_infos(self):
         self.get_infos()
-        print(f"{TITLE}\n{'=' * len(TITLE)}{self._subinfos_str(self.account_infos, 0, None)}")
+        print(f"{TITLE}\n{'─' * len(TITLE)}{self._subinfos_str(self.account_infos, 0, None)}")
 
     def get_transaction_cache(self):
         # TODO: Parameterize - no need to lock if clean overwrite
