@@ -160,19 +160,19 @@ def usage(wrong_config=False, wrong_command=False, wrong_arg_len=False):
     output_lines = [
         TITLE,
         # TODO
-        "=" * len(TITLE),
+        "─" * len(TITLE),
         """~/.config/bank/config.json => {"accounts": [ACCOUNT_INFOS, ...], "certificates": {"qonto": "..."]}"""
         "  - ACCOUNT_INFOS = {",
         '    "id": "name-XXXX"',
         '    "secret_key": "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"',
         '    "local_store_path": "XX"',
         "  - certificates = sha256sum of der_cert_bin",
-        "==========================",
+        "─" * len(TITLE),
         "- bank                              ==> gives accounts infos",
         "- bank transactions                 ==> list transactions for first account",
         "  + no-invoice                      ==> only show transactions without an invoice",
         "- bank justify end_of_id file_path  ==> add a file to a transaction by the end of its id",
-        "=======================",
+        "─" * len(TITLE),
         "This should help you get files TODO",
     ]
     print("\n" + "\n".join(output_lines) + "\n")
@@ -203,7 +203,7 @@ class Account:
             return "".join(f"\n{starter}{k}{self._subinfos_str(v, level + 1, k)}" for k, v in infos.items())
         if isinstance(infos, list):
             return "".join(f"\n{starter}#{i}{self._subinfos_str(v, level + 1, i)}" for i, v in enumerate(infos))
-        return f" {Color.DIM.value}{'-' * (34 - level * 2 - len(str(last_key)))}{Color.WHITE.value} {infos}"
+        return f" {Color.DIM.value}{'─' * (34 - level * 2 - len(str(last_key)))}{Color.WHITE.value} {infos}"
 
     def print_infos(self):
         self.get_infos()
