@@ -275,16 +275,16 @@ class Account:
             money_str += f" {'-' if t['side'] == 'debit' else '+'}{money // 100},{str(money % 100).zfill(2)} "
             emitted_at = f" {t['emitted_at'][:10]}"
             print(
-                f"{Color.DIM.value}-"
+                f"{Color.DIM.value}─"
                 f"{Color.PURP.value}{short_transaction_id}"
-                f"{Color.DIM.value}-"
-                f"{label.ljust(60 + COLOR_LEN * 2, '-')}"
-                f"{money_str.rjust(16 + COLOR_LEN, '-')}"
-                f"{Color.DIM.value}-"
+                f"{Color.DIM.value}─"
+                f"{label.ljust(60 + COLOR_LEN * 2, '─')}"
+                f"{money_str.rjust(16 + COLOR_LEN, '─')}"
+                f"{Color.DIM.value}─"
                 f"{Color.PURP.value}{emitted_at}"
             )  # TODO : local_amount vs amount?
         meta_gen = (f"{Color.PURP.value}{k}{Color.DIM.value}={Color.WHITE.value}{v}" for k, v in ts["meta"].items())
-        print("", f"{Color.DIM.value} - ".join(meta_gen))
+        print("", f"{Color.DIM.value} ─ ".join(meta_gen))
 
 
 class Config:
