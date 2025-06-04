@@ -197,11 +197,13 @@ class Account:
         )
 
     def _subinfos_str(self, infos, level, last_key):
+        starter = " " * level * 2
+        starter += (Color.GREEN.value if level == 0 else Color.PURP.value if level % 2 else Color.RED.value)
         if isinstance(infos, dict):
-            return "".join(f"\n{' ' * level * 2}{k}{self._subinfos_str(v, level + 1, k)}" for k, v in infos.items())
+            return "".join(f"\n{starter}{k}{self._subinfos_str(v, level + 1, k)}" for k, v in infos.items())
         if isinstance(infos, list):
-            return "".join(f"\n{' ' * level * 2}#{i}{self._subinfos_str(v, level + 1, i)}" for i, v in enumerate(infos))
-        return f" {Color.DIM.value}{'=' * (34 - level * 2 - len(str(last_key)))}{Color.WHITE.value} {infos}"
+            return "".join(f"\n{starter}#{i}{self._subinfos_str(v, level + 1, i)}" for i, v in enumerate(infos))
+        return f" {Color.DIM.value}{'-' * (34 - level * 2 - len(str(last_key)))}{Color.WHITE.value} {infos}"
 
     def print_infos(self):
         self.get_infos()
