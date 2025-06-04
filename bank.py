@@ -198,7 +198,7 @@ class Account:
 
     def _subinfos_str(self, infos, level, last_key):
         starter = " " * level * 2
-        starter += (Color.GREEN.value if level == 0 else Color.PURP.value if level % 2 else Color.RED.value)
+        starter += Color.GREEN.value if level == 0 else Color.PURP.value if level % 2 else Color.RED.value
         if isinstance(infos, dict):
             return "".join(f"\n{starter}{k}{self._subinfos_str(v, level + 1, k)}" for k, v in infos.items())
         if isinstance(infos, list):
