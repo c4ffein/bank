@@ -1,3 +1,16 @@
+.PHONY: help
+.PHONY: lint-check test install-build-system build-package install-package-uploader upload-package-test upload-package
+
+help:
+	@echo "Available commands:"
+	@echo "  lint-check"
+	@echo "  test"
+	@echo "  install-build-system"
+	@echo "  build-package"
+	@echo "  install-package-uploader"
+	@echo "  upload-package-test"
+	@echo "  upload-package"
+
 lint:
 	ruff check --fix; ruff format
 
