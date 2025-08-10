@@ -5,12 +5,8 @@ from unittest import main as unittest_main
 
 class BankTest(TestCase):
     def test_bank_executable_output(self):
-        result = subprocess.run(
-            ["./bank.py"],
-            capture_output=True,
-            text=True
-        )
-        with open("README.md", "r") as f:
+        result = subprocess.run(["./bank.py"], capture_output=True, text=True)
+        with Path("README.md").open() as f:
             readme_content = f.read()
         self.assertEqual(result.stdout[-2:], "\n\n")
         self.assertIn(result.stdout[:-1], readme_content)
