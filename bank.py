@@ -171,6 +171,7 @@ def usage(wrong_config=False, wrong_command=False, wrong_arg_len=False):
         "- bank                              ==> gives accounts infos",
         "- bank transactions                 ==> list transactions for first account",
         "  + no-invoice                      ==> only show transactions without an invoice",
+        "- bank j       end_of_id file_path  ==> add a file to a transaction by the end of its id",
         "- bank justify end_of_id file_path  ==> add a file to a transaction by the end of its id",
         "─" * len(TITLE),
         "This should help you get files TODO",
@@ -330,7 +331,7 @@ def main():
         if len(argv) != 3:
             return usage()
         return config.accounts[0].show_attachments(argv[2])
-    if argv[1] == "justify":
+    if argv[1] == "justify" or argv[1] == "j":
         if len(argv) != 4:
             return usage()
         with Path(argv[3]).open("rb") as f:
