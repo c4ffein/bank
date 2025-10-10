@@ -14,6 +14,11 @@ bank - KISS banking client
 - bank                              ==> gives accounts infos
 - bank transactions                 ==> list transactions for first account
   + no-invoice                      ==> only show transactions without an invoice
+  + only-invoice                    ==> only show transactions with an invoice
+  + date=2024                       ==> transactions from year 2024
+  + date>=2024                      ==> transactions from 2024 onwards
+  + date<2024                       ==> transactions before 2024
+  + date>=2023 date<2025            ==> transactions in range
 - bank j       end_of_id file_path  ==> add a file to a transaction by the end of its id
 - bank justify end_of_id file_path  ==> add a file to a transaction by the end of its id
 ──────────────────────────

@@ -5,14 +5,6 @@ bank - KISS banking Client
 MIT License - Copyright (c) 2025 c4ffein
 WARNING: I don't recommand using this as-is. This a PoC, and usable by me because I know what I want to do with it.
 - You can use it if you feel that you can edit the code yourself and you can live with my future breaking changes.
-TODOs and possible improvements:
-- clean code obviously
-- use classes to deserialize http responses
-- cleaner certificate pinning: instead of rewriting http, implement certificate-pinning through a custom sslcontext
-  - then, you can just pass this sslcontext to regular libs... not sure it's the way to go though
-- Let select a specific account instead of the first one - in the account list from the config
-- Let select a specific account instead of the first one - in the account list from the selected remote account
-- Shows money in euros and not foreign currency
 """
 
 import fcntl
@@ -654,6 +646,7 @@ class Config:
 #         parameter for parameter in parameters if not any(parameter.startswith(p) for p in allowed_parameters)
 #     ]
 #     r = {}
+# TODO Shows money in euros and not foreign currency
 
 
 def main():
