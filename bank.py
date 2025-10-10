@@ -45,7 +45,12 @@ COLOR_LEN = 4
 TITLE = "bank - KISS banking client"
 
 
-class MultiPartForm:  # TODO : Use from python snippets
+class MultiPartForm:
+    """
+    Simple multipart/form-data encoder for file uploads.
+    Original code can be found at https://github.com/c4ffein/python-snippets
+    """
+
     def __init__(self):
         self.form_fields = []
         self.files = []
@@ -124,12 +129,23 @@ class BankException(Exception):
 
 @dataclass
 class Transaction:
-    """Represents a single transaction from the Qonto API"""
+    """
+    Represents a single transaction from the Qonto API.
+
+    Amount fields explanation:
+    - amount_cents: Transaction amount in account currency (EUR for Qonto)
+    - local_amount_cents: Transaction amount in foreign currency (if applicable)
+    - currency: Account currency (always EUR for Qonto)
+    - local_currency: Foreign currency (e.g., USD for international purchases)
+    """
 
     transaction_id: str
     id: str
     label: str
-    local_amount_cents: int
+    amount_cents: int  # Account currency (EUR)
+    local_amount_cents: int  # Foreign currency (if different)
+    currency: str  # Account currency
+    local_currency: str | None  # Foreign currency (None if same as account currency)
     side: str  # "debit" or "credit"
     emitted_at: str
 
@@ -140,7 +156,10 @@ class Transaction:
             transaction_id=data["transaction_id"],
             id=data["id"],
             label=data["label"],
+            amount_cents=data["amount_cents"],
             local_amount_cents=data["local_amount_cents"],
+            currency=data["currency"],
+            local_currency=data.get("local_currency"),  # Optional for domestic transactions
             side=data["side"],
             emitted_at=data["emitted_at"],
         )
@@ -151,7 +170,10 @@ class Transaction:
             "transaction_id": self.transaction_id,
             "id": self.id,
             "label": self.label,
+            "amount_cents": self.amount_cents,
             "local_amount_cents": self.local_amount_cents,
+            "currency": self.currency,
+            "local_currency": self.local_currency,
             "side": self.side,
             "emitted_at": self.emitted_at,
         }
@@ -287,14 +309,25 @@ def parse_date_params(args: list[str]) -> DateFilter:
     return filter_obj
 
 
-def get_body(addr, url, cert_checksum, user_agent=None, authorization=None, json=True, cafile=None):
+def get_body(addr, url, cert_checksum, user_agent=None, authorization=None, json=None, cafile=None):
+    """
+    Fetch data from API endpoint.
+
+    Args:
+        json: If True, parse as JSON. If False, return raw bytes.
+              If None (default), auto-detect from Content-Type header.
+    """
     context = make_pinned_ssl_context(cert_checksum, cafile=cafile)
     headers = {
         "User-Agent": "",  # Otherwise would send default User-Agent, that does fail
         **({"Authorization": str(authorization)[2:-1]} if authorization is not None else {}),
     }
     r = urlopen(Request("https://" + (addr + url).decode(), None, headers=headers), context=context)
-    return loads(r.read()) if json else r.read()  # TODO : json is not a param, populate if type?..
+    # Auto-detect JSON from Content-Type header if not explicitly specified
+    if json is None:
+        content_type = r.headers.get("Content-Type", "")
+        json = "application/json" in content_type
+    return loads(r.read()) if json else r.read()
 
 
 def post_body(
@@ -304,10 +337,17 @@ def post_body(
     cert_checksum,
     user_agent=None,
     authorization=None,
-    json=True,
+    json=None,
     additional_headers=None,
     cafile=None,
 ):
+    """
+    POST data to API endpoint (typically for file uploads).
+
+    Args:
+        json: If True, parse as JSON. If False, return raw bytes.
+              If None (default), auto-detect from Content-Type header.
+    """
     context = make_pinned_ssl_context(cert_checksum, cafile=cafile)
     form = MultiPartForm()
     form.add_file("file", "file.pdf", file_handle=BytesIO(file_bytes))
@@ -315,13 +355,16 @@ def post_body(
     headers = {
         "User-Agent": "",  # Otherwise would send default User-Agent, that does fail
         "Content-Type": f"multipart/form-data; boundary={form.boundary.decode()}",  # Needed for file upload
-        # "X-Qonto-Idempotency-Key": str(uuid4()),  # TODO : param this
         **({"Authorization": str(authorization)[2:-1]} if authorization is not None else {}),
         **(additional_headers or {}),
     }
     request = Request("https://" + (addr + url).decode(), body, headers=headers)
-    r = urlopen(request, context=context)  # TODO: data doesnt work?
-    return loads(r.read()) if json else r.read()  # TODO : json is not a param, populate if type?..
+    r = urlopen(request, context=context)
+    # Auto-detect JSON from Content-Type header if not explicitly specified
+    if json is None:
+        content_type = r.headers.get("Content-Type", "")
+        json = "application/json" in content_type
+    return loads(r.read()) if json else r.read()
 
 
 def usage(wrong_config=False, wrong_command=False, wrong_arg_len=False):
@@ -335,6 +378,7 @@ def usage(wrong_config=False, wrong_command=False, wrong_arg_len=False):
         "- bank transactions                 ==> list transactions for first account",
         "  + no-invoice                      ==> only show transactions without an invoice",
         "  + only-invoice                    ==> only show transactions with an invoice",
+        "  + use-original-currency           ==> show amounts in foreign currency (when applicable)",
         "  + date=2024                       ==> transactions from year 2024",
         "  + date>=2024                      ==> transactions from 2024 onwards",
         "  + date<2024                       ==> transactions before 2024",
@@ -571,7 +615,12 @@ class Account:
         print(f"{Color.GREEN.value}✓ Attachment uploaded successfully{Color.WHITE.value}")
         print(f"{Color.DIM.value}Log: ~/.local/state/bank/justify_log.jsonl{Color.WHITE.value}")
 
-    def print_transactions(self, attachments: bool | None = None, date_filter: DateFilter | None = None) -> None:
+    def print_transactions(
+        self,
+        attachments: bool | None = None,
+        date_filter: DateFilter | None = None,
+        use_original_currency: bool = False,
+    ) -> None:
         """
         Fetch and display transactions with optional filtering.
 
@@ -580,6 +629,8 @@ class Account:
                          If False, show only transactions without attachments (no-invoice).
                          If None, show all transactions.
             date_filter: Optional DateFilter to filter transactions by emission date.
+            use_original_currency: If True, show amounts in foreign currency (when applicable).
+                                   If False (default), show amounts in account currency (EUR).
         """
         self.get_infos()
         account_id = str.encode(self.account_infos.organization.bank_accounts[0].id)
@@ -608,19 +659,26 @@ class Account:
         for t in ts.transactions:
             short_transaction_id = f" {t.transaction_id[-6:]} "
             label = f"{Color.WHITE.value} {t.label}{Color.DIM.value} "
-            money = t.local_amount_cents
+            # Choose which currency to display
+            if use_original_currency and t.local_currency and t.local_currency != t.currency:
+                money = t.local_amount_cents
+                currency_code = t.local_currency
+            else:
+                money = t.amount_cents
+                currency_code = t.currency
             money_str = Color.RED.value if t.side == "debit" else Color.GREEN.value
-            money_str += f" {'-' if t.side == 'debit' else '+'}{money // 100},{str(money % 100).zfill(2)} "
+            sign = "-" if t.side == "debit" else "+"
+            money_str += f" {sign}{money // 100},{str(money % 100).zfill(2)} {currency_code} "
             emitted_at = f" {t.emitted_at[:10]}"
             print(
                 f"{Color.DIM.value}─"
                 f"{Color.PURP.value}{short_transaction_id}"
                 f"{Color.DIM.value}─"
                 f"{label.ljust(60 + COLOR_LEN * 2, '─')}"
-                f"{money_str.rjust(16 + COLOR_LEN, '─')}"
+                f"{money_str.rjust(20 + COLOR_LEN, '─')}"
                 f"{Color.DIM.value}─"
                 f"{Color.PURP.value}{emitted_at}"
-            )  # TODO : local_amount vs amount?
+            )
         meta_gen = (f"{Color.PURP.value}{k}{Color.DIM.value}={Color.WHITE.value}{v}" for k, v in ts.meta.items())
         print("", f"{Color.DIM.value} ─ ".join(meta_gen))
 
@@ -663,15 +721,6 @@ class Config:
             raise BankException(f"Only single account supported, found {len(self.accounts)} in config")
 
 
-# TODO implement or delete
-# def consume_subparameters(allowed_parameters, parameters):
-#     unknown_parameters = [
-#         parameter for parameter in parameters if not any(parameter.startswith(p) for p in allowed_parameters)
-#     ]
-#     r = {}
-# TODO Shows money in euros and not foreign currency
-
-
 def main():
     # Check for help command before loading config
     if len(argv) >= 2 and argv[1] == "help":
@@ -693,10 +742,12 @@ def main():
         if has_no_invoice and has_only_invoice:
             raise BankException("Cannot use both 'no-invoice' and 'only-invoice' parameters")
         attachments = False if has_no_invoice else (True if has_only_invoice else None)
+        use_original_currency = "use-original-currency" in argv[2:]
         date_filter = parse_date_params(argv[2:])
         return config.accounts[0].print_transactions(
             attachments=attachments,
             date_filter=date_filter if date_filter.emitted_at_from or date_filter.emitted_at_to else None,
+            use_original_currency=use_original_currency,
         )
     if argv[1] == "show":
         if len(argv) != 3:

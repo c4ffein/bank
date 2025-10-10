@@ -15,6 +15,7 @@ bank - KISS banking client
 - bank transactions                 ==> list transactions for first account
   + no-invoice                      ==> only show transactions without an invoice
   + only-invoice                    ==> only show transactions with an invoice
+  + use-original-currency           ==> show amounts in foreign currency (when applicable)
   + date=2024                       ==> transactions from year 2024
   + date>=2024                      ==> transactions from 2024 onwards
   + date<2024                       ==> transactions before 2024
