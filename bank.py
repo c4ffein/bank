@@ -19,6 +19,7 @@ import fcntl
 import mimetypes
 import os
 from binascii import hexlify
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 from hashlib import sha256
@@ -127,6 +128,89 @@ def make_pinned_ssl_context(pinned_sha_256, cafile=None, capath=None, cadata=Non
 
 class BankException(Exception):
     pass
+
+
+@dataclass
+class Transaction:
+    """Represents a single transaction from the Qonto API"""
+
+    transaction_id: str
+    id: str
+    label: str
+    local_amount_cents: int
+    side: str  # "debit" or "credit"
+    emitted_at: str
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "Transaction":
+        """Create Transaction from API response dict"""
+        return cls(
+            transaction_id=data["transaction_id"],
+            id=data["id"],
+            label=data["label"],
+            local_amount_cents=data["local_amount_cents"],
+            side=data["side"],
+            emitted_at=data["emitted_at"],
+        )
+
+    def to_dict(self) -> dict:
+        """Convert back to dict for caching"""
+        return {
+            "transaction_id": self.transaction_id,
+            "id": self.id,
+            "label": self.label,
+            "local_amount_cents": self.local_amount_cents,
+            "side": self.side,
+            "emitted_at": self.emitted_at,
+        }
+
+
+@dataclass
+class BankAccount:
+    """Represents a bank account from organization info"""
+
+    id: str
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "BankAccount":
+        return cls(id=data["id"])
+
+
+@dataclass
+class Organization:
+    """Represents organization info from the API"""
+
+    bank_accounts: list[BankAccount]
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "Organization":
+        return cls(bank_accounts=[BankAccount.from_dict(ba) for ba in data["bank_accounts"]])
+
+
+@dataclass
+class OrganizationResponse:
+    """Response from /v2/organization endpoint"""
+
+    organization: Organization
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "OrganizationResponse":
+        return cls(organization=Organization.from_dict(data["organization"]))
+
+
+@dataclass
+class TransactionsResponse:
+    """Response from /v2/transactions endpoint"""
+
+    transactions: list[Transaction]
+    meta: dict
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "TransactionsResponse":
+        return cls(
+            transactions=[Transaction.from_dict(t) for t in data["transactions"]],
+            meta=data["meta"],
+        )
 
 
 def get_body(addr, url, cert_checksum, user_agent=None, authorization=None, json=True, cafile=None):
@@ -249,9 +333,10 @@ class Account:
         return str.encode(f"{self.organization_slug}:{self.secret_key}")
 
     def get_infos(self):
-        self.account_infos = get_body(
+        response_dict = get_body(
             self.endpoint, b"/v2/organization", self.cert_checksum, authorization=self.auth_str, cafile=self.ssl_cafile
         )
+        self.account_infos = OrganizationResponse.from_dict(response_dict)
 
     def _subinfos_str(self, infos, level, last_key):
         starter = " " * level * 2
@@ -264,7 +349,11 @@ class Account:
 
     def print_infos(self):
         self.get_infos()
-        print(f"{TITLE}\n{'─' * len(TITLE)}{self._subinfos_str(self.account_infos, 0, None)}")
+        # Convert back to dict for pretty printing (could improve this later)
+        response_dict = get_body(
+            self.endpoint, b"/v2/organization", self.cert_checksum, authorization=self.auth_str, cafile=self.ssl_cafile
+        )
+        print(f"{TITLE}\n{'─' * len(TITLE)}{self._subinfos_str(response_dict, 0, None)}")
 
     def _read_cache_unlocked(self):
         """Read cache without acquiring lock - caller must hold lock"""
@@ -389,23 +478,27 @@ class Account:
 
     def print_transactions(self, attachments=None):
         self.get_infos()
-        account_id = str.encode(self.account_infos["organization"]["bank_accounts"][0]["id"])
+        account_id = str.encode(self.account_infos.organization.bank_accounts[0].id)
         assert len(account_id) == 36 and all(chr(c) in "0123456789abcdef-" for c in account_id)  # TODO real exception
         with_attachments_query = (
             b"with_attachments=" + (b"true" if attachments else b"false") + b"&" if attachments is not None else b""
         )
         url = b"/v2/transactions?" + with_attachments_query + b"bank_account_id="
-        ts = get_body(
+        response_dict = get_body(
             self.endpoint, url + account_id, self.cert_checksum, authorization=self.auth_str, cafile=self.ssl_cafile
         )
-        self.save_transaction_cache(ts["transactions"])
-        for t in ts["transactions"]:
-            short_transaction_id = f" {t['transaction_id'][-6:]} "
-            label = f"{Color.WHITE.value} {t['label']}{Color.DIM.value} "
-            money = int(t["local_amount_cents"])
-            money_str = Color.RED.value if t["side"] == "debit" else Color.GREEN.value
-            money_str += f" {'-' if t['side'] == 'debit' else '+'}{money // 100},{str(money % 100).zfill(2)} "
-            emitted_at = f" {t['emitted_at'][:10]}"
+        ts = TransactionsResponse.from_dict(response_dict)
+
+        # Save transactions to cache (convert to dicts)
+        self.save_transaction_cache([t.to_dict() for t in ts.transactions])
+
+        for t in ts.transactions:
+            short_transaction_id = f" {t.transaction_id[-6:]} "
+            label = f"{Color.WHITE.value} {t.label}{Color.DIM.value} "
+            money = t.local_amount_cents
+            money_str = Color.RED.value if t.side == "debit" else Color.GREEN.value
+            money_str += f" {'-' if t.side == 'debit' else '+'}{money // 100},{str(money % 100).zfill(2)} "
+            emitted_at = f" {t.emitted_at[:10]}"
             print(
                 f"{Color.DIM.value}─"
                 f"{Color.PURP.value}{short_transaction_id}"
@@ -415,7 +508,7 @@ class Account:
                 f"{Color.DIM.value}─"
                 f"{Color.PURP.value}{emitted_at}"
             )  # TODO : local_amount vs amount?
-        meta_gen = (f"{Color.PURP.value}{k}{Color.DIM.value}={Color.WHITE.value}{v}" for k, v in ts["meta"].items())
+        meta_gen = (f"{Color.PURP.value}{k}{Color.DIM.value}={Color.WHITE.value}{v}" for k, v in ts.meta.items())
         print("", f"{Color.DIM.value} ─ ".join(meta_gen))
 
 
