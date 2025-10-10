@@ -19,6 +19,7 @@ import fcntl
 import mimetypes
 import os
 from binascii import hexlify
+from datetime import datetime, timezone
 from enum import Enum
 from hashlib import sha256
 from io import BytesIO
@@ -328,24 +329,60 @@ class Account:
         url = b"/v2/transactions/" + transaction_id.encode() + b"/attachments"
         pp(get_body(self.endpoint, url, self.cert_checksum, authorization=self.auth_str, cafile=self.ssl_cafile))
 
+    def _log_justify_attempt(self, transaction_id, idempotency_key, file_size, status, error=None):
+        """Log justify attempt to file for recovery"""
+        log_path = Path.home() / ".local" / "state" / "bank" / "justify_log.jsonl"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+
+        log_entry = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "transaction_id": transaction_id,
+            "idempotency_key": idempotency_key,
+            "file_size": file_size,
+            "status": status,  # "started", "success", "failed"
+        }
+        if error:
+            log_entry["error"] = str(error)
+
+        with log_path.open("a") as f:
+            f.write(dumps(log_entry) + "\n")
+
     def justify(self, partial_id, file):
         transaction = self.get_one_transaction(partial_id)
+        transaction_id = transaction["id"]
         idempo = str(uuid4())
-        print(f"Idempotent id: {idempo}")
+        file_size = len(file)
+
+        # Log the attempt before making the request
+        self._log_justify_attempt(transaction_id, idempo, file_size, "started")
+
+        print(f"{Color.DIM.value}Transaction ID: {Color.WHITE.value}{transaction_id}")
+        print(f"{Color.DIM.value}Idempotency key: {Color.PURP.value}{idempo}{Color.WHITE.value}")
+        print(f"{Color.DIM.value}File size: {Color.WHITE.value}{file_size} bytes")
+        print(f"{Color.DIM.value}Uploading...{Color.WHITE.value}")
+
         try:
             r = post_body(
                 self.endpoint,
-                b"/v2/transactions/" + transaction["id"].encode() + b"/attachments",
+                b"/v2/transactions/" + transaction_id.encode() + b"/attachments",
                 file,
                 self.cert_checksum,
                 authorization=self.auth_str,
-                additional_headers={"X-Qonto-Idempotency-Key": idempo},  # TODO : consume this
+                additional_headers={"X-Qonto-Idempotency-Key": idempo},
                 cafile=self.ssl_cafile,
             )
-        except Exception:
-            raise
-        assert r == {}  # TODO Better
-        # TODO NOW USE IDEMPOTENCY, CLEAN CODE, SHOW ID
+        except Exception as e:
+            self._log_justify_attempt(transaction_id, idempo, file_size, "failed", error=str(e))
+            raise BankException(f"Upload failed: {e}") from e
+
+        # Validate response
+        if r != {}:
+            self._log_justify_attempt(transaction_id, idempo, file_size, "failed", error=f"Unexpected response: {r}")
+            raise BankException(f"Unexpected API response: {r}")
+
+        self._log_justify_attempt(transaction_id, idempo, file_size, "success")
+        print(f"{Color.GREEN.value}✓ Attachment uploaded successfully{Color.WHITE.value}")
+        print(f"{Color.DIM.value}Log: ~/.local/state/bank/justify_log.jsonl{Color.WHITE.value}")
 
     def print_transactions(self, attachments=None):
         self.get_infos()
