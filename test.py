@@ -2,8 +2,9 @@ import subprocess
 from pathlib import Path
 from unittest import TestCase
 from unittest import main as unittest_main
+from unittest.mock import patch
 
-from bank import BankException, Config, parse_date_params
+from bank import Account, BankException, Config, parse_date_params
 
 
 class ReadmeTest(TestCase):
@@ -211,6 +212,181 @@ class DateParsingTest(TestCase):
         with self.assertRaises(BankException) as ctx:
             parse_date_params(["date:2024"])
         self.assertEqual(str(ctx.exception), "Invalid date parameter format: date:2024")
+
+
+class DateParameterIntegrationTest(TestCase):
+    """Test date parameter integration in API requests"""
+
+    def setUp(self):
+        """Create a test account instance"""
+        account_dict = {
+            "id": "test-org-slug",
+            "secret_key": "test-secret-key",
+            "local_store_path": "/tmp/test-cache",
+        }
+        self.account = Account(account_dict, "a" * 64, ssl_cafile=None)
+
+    def _mock_get_body(self, addr, url, *args, **kwargs):
+        """Mock get_body to return appropriate responses based on URL"""
+        if url == b"/v2/organization":
+            # Return organization info for get_infos call
+            return {"organization": {"bank_accounts": [{"id": "12345678-1234-1234-1234-123456789abc"}]}}
+        elif b"/v2/transactions" in url:
+            # Return empty transaction list with required meta field
+            return {
+                "transactions": [],
+                "meta": {
+                    "current_page": 1,
+                    "next_page": None,
+                    "prev_page": None,
+                    "total_pages": 1,
+                    "total_count": 0,
+                    "per_page": 100,
+                },
+            }
+        raise ValueError(f"Unexpected URL in mock: {url}")
+
+    @patch("builtins.print")
+    @patch("bank.get_body")
+    def test_date_equals_in_request(self, mock_get_body, mock_print):
+        """Should send both emitted_at_from and emitted_at_to for date=2024"""
+        mock_get_body.side_effect = self._mock_get_body
+        date_filter = parse_date_params(["date=2024"])
+        self.account.print_transactions(date_filter=date_filter)
+        # Get the transactions call
+        transactions_call = mock_get_body.call_args_list[1]
+        url = transactions_call[0][1]
+        self.assertIn(b"emitted_at_from=2024-01-01T00:00:00Z", url)
+        self.assertIn(b"emitted_at_to=2024-12-31T23:59:59Z", url)
+
+    @patch("builtins.print")
+    @patch("bank.get_body")
+    def test_date_from_in_request(self, mock_get_body, mock_print):
+        """Should send only emitted_at_from for date>=2024"""
+        mock_get_body.side_effect = self._mock_get_body
+        date_filter = parse_date_params(["date>=2024"])
+        self.account.print_transactions(date_filter=date_filter)
+        # Get the transactions call
+        transactions_call = mock_get_body.call_args_list[1]
+        url = transactions_call[0][1]
+        self.assertIn(b"emitted_at_from=2024-01-01T00:00:00Z", url)
+        self.assertNotIn(b"emitted_at_to", url)
+
+    @patch("builtins.print")
+    @patch("bank.get_body")
+    def test_date_to_in_request(self, mock_get_body, mock_print):
+        """Should send only emitted_at_to for date<2024"""
+        mock_get_body.side_effect = self._mock_get_body
+        date_filter = parse_date_params(["date<2024"])
+        self.account.print_transactions(date_filter=date_filter)
+        # Get the transactions call
+        transactions_call = mock_get_body.call_args_list[1]
+        url = transactions_call[0][1]
+        self.assertNotIn(b"emitted_at_from", url)
+        self.assertIn(b"emitted_at_to=2023-12-31T23:59:59Z", url)
+
+    @patch("builtins.print")
+    @patch("bank.get_body")
+    def test_date_range_in_request(self, mock_get_body, mock_print):
+        """Should send both parameters for date range"""
+        mock_get_body.side_effect = self._mock_get_body
+        date_filter = parse_date_params(["date>=2023", "date<2025"])
+        self.account.print_transactions(date_filter=date_filter)
+        # Get the transactions call
+        transactions_call = mock_get_body.call_args_list[1]
+        url = transactions_call[0][1]
+        self.assertIn(b"emitted_at_from=2023-01-01T00:00:00Z", url)
+        self.assertIn(b"emitted_at_to=2024-12-31T23:59:59Z", url)
+
+    @patch("builtins.print")
+    @patch("bank.get_body")
+    def test_no_date_filter_in_request(self, mock_get_body, mock_print):
+        """Should not send date parameters when no filter is provided"""
+        mock_get_body.side_effect = self._mock_get_body
+        self.account.print_transactions(date_filter=None)
+        # Get the transactions call
+        transactions_call = mock_get_body.call_args_list[1]
+        url = transactions_call[0][1]
+        self.assertNotIn(b"emitted_at_from", url)
+        self.assertNotIn(b"emitted_at_to", url)
+
+
+class InvoiceParameterTest(TestCase):
+    """Test invoice parameter handling in API requests"""
+
+    def setUp(self):
+        """Create a test account instance"""
+        account_dict = {
+            "id": "test-org-slug",
+            "secret_key": "test-secret-key",
+            "local_store_path": "/tmp/test-cache",
+        }
+        self.account = Account(account_dict, "a" * 64, ssl_cafile=None)
+
+    def _mock_get_body(self, addr, url, *args, **kwargs):
+        """Mock get_body to return appropriate responses based on URL"""
+        if url == b"/v2/organization":
+            # Return organization info for get_infos call
+            return {"organization": {"bank_accounts": [{"id": "12345678-1234-1234-1234-123456789abc"}]}}
+        elif b"/v2/transactions" in url:
+            # Return empty transaction list with required meta field
+            return {
+                "transactions": [],
+                "meta": {
+                    "current_page": 1,
+                    "next_page": None,
+                    "prev_page": None,
+                    "total_pages": 1,
+                    "total_count": 0,
+                    "per_page": 100,
+                },
+            }
+        raise ValueError(f"Unexpected URL in mock: {url}")
+
+    @patch("builtins.print")
+    @patch("bank.get_body")
+    def test_no_invoice_parameter(self, mock_get_body, mock_print):
+        """Should send with_attachments=false when no-invoice is specified"""
+        # Mock get_body with side_effect to handle multiple calls
+        mock_get_body.side_effect = self._mock_get_body
+        # Call print_transactions with attachments=False (no-invoice)
+        self.account.print_transactions(attachments=False)
+        # Verify get_body was called twice (once for org info, once for transactions)
+        self.assertEqual(mock_get_body.call_count, 2)
+        # Get the second call (transactions call)
+        transactions_call = mock_get_body.call_args_list[1]
+        url = transactions_call[0][1]  # Second positional argument is the URL
+        self.assertIn(b"with_attachments=false", url)
+
+    @patch("builtins.print")
+    @patch("bank.get_body")
+    def test_only_invoice_parameter(self, mock_get_body, mock_print):
+        """Should send with_attachments=true when only-invoice is specified"""
+        # Mock get_body with side_effect to handle multiple calls
+        mock_get_body.side_effect = self._mock_get_body
+        # Call print_transactions with attachments=True (only-invoice)
+        self.account.print_transactions(attachments=True)
+        # Verify get_body was called twice (once for org info, once for transactions)
+        self.assertEqual(mock_get_body.call_count, 2)
+        # Get the second call (transactions call)
+        transactions_call = mock_get_body.call_args_list[1]
+        url = transactions_call[0][1]  # Second positional argument is the URL
+        self.assertIn(b"with_attachments=true", url)
+
+    @patch("builtins.print")
+    @patch("bank.get_body")
+    def test_no_invoice_parameter_specified(self, mock_get_body, mock_print):
+        """Should not send with_attachments parameter when neither flag is specified"""
+        # Mock get_body with side_effect to handle multiple calls
+        mock_get_body.side_effect = self._mock_get_body
+        # Call print_transactions with attachments=None (no parameter)
+        self.account.print_transactions(attachments=None)
+        # Verify get_body was called twice (once for org info, once for transactions)
+        self.assertEqual(mock_get_body.call_count, 2)
+        # Get the second call (transactions call)
+        transactions_call = mock_get_body.call_args_list[1]
+        url = transactions_call[0][1]  # Second positional argument is the URL
+        self.assertNotIn(b"with_attachments", url)
 
 
 if __name__ == "__main__":
