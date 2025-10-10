@@ -398,7 +398,22 @@ def help_config():
 
 
 class Account:
+    """
+    Represents a banking account with methods to interact with the Qonto API.
+
+    Handles transaction retrieval, caching, attachment uploads, and account information display.
+    Uses certificate pinning for secure API communication.
+    """
+
     def __init__(self, account_dict, cert_checksum, ssl_cafile=None):
+        """
+        Initialize an Account instance.
+
+        Args:
+            account_dict: Dict containing 'id', 'secret_key', and 'local_store_path'
+            cert_checksum: SHA256 hash of the pinned certificate
+            ssl_cafile: Optional path to CA bundle file for additional TLS verification
+        """
         self.endpoint = b"thirdparty.qonto.com"
         account_keys = ["id", "secret_key", "local_store_path"]
         self.organization_slug, self.secret_key, self.local_store_path = (account_dict[k] for k in account_keys)
@@ -408,9 +423,11 @@ class Account:
 
     @property
     def auth_str(self):
+        """Generate authorization string for API requests."""
         return str.encode(f"{self.organization_slug}:{self.secret_key}")
 
     def get_infos(self):
+        """Fetch and store organization information from the API."""
         response_dict = get_body(
             self.endpoint, b"/v2/organization", self.cert_checksum, authorization=self.auth_str, cafile=self.ssl_cafile
         )
@@ -554,11 +571,21 @@ class Account:
         print(f"{Color.GREEN.value}✓ Attachment uploaded successfully{Color.WHITE.value}")
         print(f"{Color.DIM.value}Log: ~/.local/state/bank/justify_log.jsonl{Color.WHITE.value}")
 
-    def print_transactions(self, attachments=None, date_filter=None):
+    def print_transactions(self, attachments: bool | None = None, date_filter: DateFilter | None = None) -> None:
+        """
+        Fetch and display transactions with optional filtering.
+
+        Args:
+            attachments: If True, show only transactions with attachments (only-invoice).
+                         If False, show only transactions without attachments (no-invoice).
+                         If None, show all transactions.
+            date_filter: Optional DateFilter to filter transactions by emission date.
+        """
         self.get_infos()
         account_id = str.encode(self.account_infos.organization.bank_accounts[0].id)
-        assert len(account_id) == 36 and all(chr(c) in "0123456789abcdef-" for c in account_id)  # TODO real exception
-
+        # Validate account_id is a valid UUID format (36 chars: 8-4-4-4-12 with hyphens)
+        if len(account_id) != 36 or not all(chr(c) in "0123456789abcdef-" for c in account_id):
+            raise BankException(f"Invalid account ID format: expected UUID, got {account_id.decode()}")
         # Build query parameters
         query_params = []
         if attachments is not None:
@@ -568,20 +595,16 @@ class Account:
                 query_params.append(b"emitted_at_from=" + date_filter.emitted_at_from.encode())
             if date_filter.emitted_at_to:
                 query_params.append(b"emitted_at_to=" + date_filter.emitted_at_to.encode())
-
         query_string = b"&".join(query_params)
         if query_string:
             query_string += b"&"
-
         url = b"/v2/transactions?" + query_string + b"bank_account_id="
         response_dict = get_body(
             self.endpoint, url + account_id, self.cert_checksum, authorization=self.auth_str, cafile=self.ssl_cafile
         )
         ts = TransactionsResponse.from_dict(response_dict)
-
         # Save transactions to cache (convert to dicts)
         self.save_transaction_cache([t.to_dict() for t in ts.transactions])
-
         for t in ts.transactions:
             short_transaction_id = f" {t.transaction_id[-6:]} "
             label = f"{Color.WHITE.value} {t.label}{Color.DIM.value} "
