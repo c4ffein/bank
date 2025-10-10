@@ -20,6 +20,9 @@ lint-check:
 test:
 	python3 test.py
 
+fast-validate:
+	ruff check --fix && ruff format && && make test
+
 install-build-system:
 	python3 -m pip install --upgrade build
 
