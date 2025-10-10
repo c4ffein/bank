@@ -515,16 +515,36 @@ class Account:
 class Config:
     def __init__(self, input_str):
         json = loads(input_str)
-        self.certificates = {"qonto": json["certificates"].get("qonto").lower()}
-        if any(
-            (c is not None and (not isinstance(c, str) or len(c) != 64 or any(v not in "0123456789abcdef" for v in c)))
-            for c in self.certificates.values()
-        ):
-            raise Exception  # TODO Better
+        # Validate required top-level fields
+        if "certificates" not in json:
+            raise BankException("Missing 'certificates' field in config")
+        if "accounts" not in json:
+            raise BankException("Missing 'accounts' field in config")
+        # Validate certificates
+        if "qonto" not in json["certificates"]:
+            raise BankException("Missing 'certificates.qonto' field in config")
+        qonto_cert = json["certificates"]["qonto"]
+        if not isinstance(qonto_cert, str):
+            raise BankException(f"Certificate must be a string, got {type(qonto_cert).__name__}")
+        qonto_cert = qonto_cert.lower()
+        if len(qonto_cert) != 64:
+            raise BankException(f"Certificate must be 64 hex characters, got {len(qonto_cert)}")
+        if any(c not in "0123456789abcdef" for c in qonto_cert):
+            raise BankException("Certificate must contain only hexadecimal characters (0-9, a-f)")
+        self.certificates = {"qonto": qonto_cert}
         # Optional: system CA bundle path for better TLS validation (in addition to cert pinning)
         self.ssl_cafile = json.get("ssl_cafile")
+        # Validate accounts
+        if not isinstance(json["accounts"], list):
+            raise BankException(f"'accounts' must be a list, got {type(json['accounts']).__name__}")
+        if len(json["accounts"]) == 0:
+            raise BankException("'accounts' list cannot be empty")
+        # Validate each account has required fields
+        for i, account in enumerate(json["accounts"]):
+            for field in ["id", "secret_key", "local_store_path"]:
+                if field not in account:
+                    raise BankException(f"Missing '{field}' in account #{i + 1}")
         self.accounts = [Account(a, self.certificates["qonto"], ssl_cafile=self.ssl_cafile) for a in json["accounts"]]
-
         # Currently only single account is supported
         if len(self.accounts) != 1:
             raise BankException(f"Only single account supported, found {len(self.accounts)} in config")
