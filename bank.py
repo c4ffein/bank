@@ -179,7 +179,7 @@ def usage(wrong_config=False, wrong_command=False, wrong_arg_len=False):
         "- bank j       end_of_id file_path  ==> add a file to a transaction by the end of its id",
         "- bank justify end_of_id file_path  ==> add a file to a transaction by the end of its id",
         "─" * len(TITLE),
-        "This should help you get files TODO",
+        "Only working with Qonto for now, for my specific use-cases",
     ]
     print("\n" + "\n".join(output_lines) + "\n")
     return -1
