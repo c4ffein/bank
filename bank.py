@@ -213,6 +213,88 @@ class TransactionsResponse:
         )
 
 
+@dataclass
+class DateFilter:
+    """Parsed date filter parameters for API queries"""
+
+    emitted_at_from: str | None = None
+    emitted_at_to: str | None = None
+
+
+def parse_date_params(args: list[str]) -> DateFilter:
+    """
+    Parse date filter parameters from command line arguments.
+
+    Supported formats (phase 1 - year only):
+    - date=2024       → full year 2024
+    - date>=2024      → from 2024 onwards
+    - date>2024       → from 2025 onwards
+    - date<=2024      → until end of 2024
+    - date<2024       → until end of 2023
+    - date>=2023 date<2025  → range
+
+    Returns DateFilter with emitted_at_from/to in ISO 8601 format for API.
+    """
+    date_params = [arg for arg in args if arg.startswith("date")]
+
+    if len(date_params) > 2:
+        raise BankException("Maximum 2 date parameters allowed")
+
+    filter_obj = DateFilter()
+
+    for param in date_params:
+        # Parse operator and value - check specific prefixes
+        if param.startswith("date>="):
+            op, value = ">=", param[6:]  # len("date>=") = 6
+        elif param.startswith("date<="):
+            op, value = "<=", param[6:]  # len("date<=") = 6
+        elif param.startswith("date>"):
+            op, value = ">", param[5:]  # len("date>") = 5
+        elif param.startswith("date<"):
+            op, value = "<", param[5:]  # len("date<") = 5
+        elif param.startswith("date="):
+            op, value = "=", param[5:]  # len("date=") = 5
+        else:
+            raise BankException(f"Invalid date parameter format: {param}")
+
+        # Validate year format (4 digits)
+        if not value.isdigit() or len(value) != 4:
+            raise BankException(f"Year must be 4 digits, got: {value}")
+
+        year = int(value)
+
+        # Convert to ISO 8601 timestamps
+        if op == "=":
+            # Full year
+            if filter_obj.emitted_at_from or filter_obj.emitted_at_to:
+                raise BankException("Cannot combine date= with other date operators")
+            filter_obj.emitted_at_from = f"{year}-01-01T00:00:00Z"
+            filter_obj.emitted_at_to = f"{year}-12-31T23:59:59Z"
+        elif op == ">=":
+            if filter_obj.emitted_at_from:
+                raise BankException("Cannot specify multiple 'from' date parameters")
+            filter_obj.emitted_at_from = f"{year}-01-01T00:00:00Z"
+        elif op == ">":
+            if filter_obj.emitted_at_from:
+                raise BankException("Cannot specify multiple 'from' date parameters")
+            filter_obj.emitted_at_from = f"{year + 1}-01-01T00:00:00Z"
+        elif op == "<=":
+            if filter_obj.emitted_at_to:
+                raise BankException("Cannot specify multiple 'to' date parameters")
+            filter_obj.emitted_at_to = f"{year}-12-31T23:59:59Z"
+        elif op == "<":
+            if filter_obj.emitted_at_to:
+                raise BankException("Cannot specify multiple 'to' date parameters")
+            filter_obj.emitted_at_to = f"{year - 1}-12-31T23:59:59Z"
+
+    # Validate range if both from and to are specified
+    if filter_obj.emitted_at_from and filter_obj.emitted_at_to:
+        if filter_obj.emitted_at_from > filter_obj.emitted_at_to:
+            raise BankException("Invalid date range: 'from' date must be before 'to' date")
+
+    return filter_obj
+
+
 def get_body(addr, url, cert_checksum, user_agent=None, authorization=None, json=True, cafile=None):
     context = make_pinned_ssl_context(cert_checksum, cafile=cafile)
     headers = {
@@ -253,7 +335,6 @@ def post_body(
 def usage(wrong_config=False, wrong_command=False, wrong_arg_len=False):
     output_lines = [
         TITLE,
-        # TODO
         "─" * len(TITLE),
         "- bank help                         ==> show this help",
         "  + config                          ==> helps you with the configuration file",
@@ -261,6 +342,11 @@ def usage(wrong_config=False, wrong_command=False, wrong_arg_len=False):
         "- bank                              ==> gives accounts infos",
         "- bank transactions                 ==> list transactions for first account",
         "  + no-invoice                      ==> only show transactions without an invoice",
+        "  + only-invoice                    ==> only show transactions with an invoice",
+        "  + date=2024                       ==> transactions from year 2024",
+        "  + date>=2024                      ==> transactions from 2024 onwards",
+        "  + date<2024                       ==> transactions before 2024",
+        "  + date>=2023 date<2025            ==> transactions in range",
         "- bank j       end_of_id file_path  ==> add a file to a transaction by the end of its id",
         "- bank justify end_of_id file_path  ==> add a file to a transaction by the end of its id",
         "─" * len(TITLE),
@@ -476,14 +562,26 @@ class Account:
         print(f"{Color.GREEN.value}✓ Attachment uploaded successfully{Color.WHITE.value}")
         print(f"{Color.DIM.value}Log: ~/.local/state/bank/justify_log.jsonl{Color.WHITE.value}")
 
-    def print_transactions(self, attachments=None):
+    def print_transactions(self, attachments=None, date_filter=None):
         self.get_infos()
         account_id = str.encode(self.account_infos.organization.bank_accounts[0].id)
         assert len(account_id) == 36 and all(chr(c) in "0123456789abcdef-" for c in account_id)  # TODO real exception
-        with_attachments_query = (
-            b"with_attachments=" + (b"true" if attachments else b"false") + b"&" if attachments is not None else b""
-        )
-        url = b"/v2/transactions?" + with_attachments_query + b"bank_account_id="
+
+        # Build query parameters
+        query_params = []
+        if attachments is not None:
+            query_params.append(b"with_attachments=" + (b"true" if attachments else b"false"))
+        if date_filter:
+            if date_filter.emitted_at_from:
+                query_params.append(b"emitted_at_from=" + date_filter.emitted_at_from.encode())
+            if date_filter.emitted_at_to:
+                query_params.append(b"emitted_at_to=" + date_filter.emitted_at_to.encode())
+
+        query_string = b"&".join(query_params)
+        if query_string:
+            query_string += b"&"
+
+        url = b"/v2/transactions?" + query_string + b"bank_account_id="
         response_dict = get_body(
             self.endpoint, url + account_id, self.cert_checksum, authorization=self.auth_str, cafile=self.ssl_cafile
         )
@@ -573,12 +671,17 @@ def main():
     if len(argv) < 2 or argv[1] == "accounts":
         return config.accounts[0].print_infos()
     if argv[1] == "transactions":
-        if "no-invoice" in argv[2:]:
-            return config.accounts[0].print_transactions(attachments=False)  # TODO: Better obviously
-        return config.accounts[0].print_transactions()
-        # TODO: parameters to limit year, show missing invoices only
-        # TODO: year<2024 / year<=2024 / year=2024 etc
-        # TODO: missing=True / missing=true / missing=y
+        # Parse parameters
+        has_no_invoice = "no-invoice" in argv[2:]
+        has_only_invoice = "only-invoice" in argv[2:]
+        if has_no_invoice and has_only_invoice:
+            raise BankException("Cannot use both 'no-invoice' and 'only-invoice' parameters")
+        attachments = False if has_no_invoice else (True if has_only_invoice else None)
+        date_filter = parse_date_params(argv[2:])
+        return config.accounts[0].print_transactions(
+            attachments=attachments,
+            date_filter=date_filter if date_filter.emitted_at_from or date_filter.emitted_at_to else None,
+        )
     if argv[1] == "show":
         if len(argv) != 3:
             return usage()
