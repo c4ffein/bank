@@ -15,6 +15,7 @@ TODOs and possible improvements:
 - Shows money in euros and not foreign currency
 """
 
+import fcntl
 import mimetypes
 import os
 from binascii import hexlify
@@ -77,7 +78,7 @@ class MultiPartForm:  # TODO : Use from python snippets
         return b"\r\n".join([*chain(*(chain(forms_to_add, files_to_add))), b"--" + self.boundary + b"--", b""])
 
 
-def make_pinned_ssl_context(pinned_sha_256):
+def make_pinned_ssl_context(pinned_sha_256, cafile=None, capath=None, cadata=None):
     """
     Returns an instance of a subclass of SSLContext that uses a subclass of SSLSocket
     that actually verifies the sha256 of the certificate during the TLS handshake
@@ -99,7 +100,7 @@ def make_pinned_ssl_context(pinned_sha_256):
     class PinnedSSLContext(SSLContext):
         sslsocket_class = PinnedSSLSocket
 
-    def create_pinned_default_context(purpose=Purpose.SERVER_AUTH, *, cafile=None, capath=None, cadata=None):
+    def create_pinned_default_context(purpose=Purpose.SERVER_AUTH):
         if not isinstance(purpose, _ASN1Object):
             raise TypeError(purpose)
         if purpose == Purpose.SERVER_AUTH:  # Verify certs and host name in client mode
@@ -127,8 +128,8 @@ class BankException(Exception):
     pass
 
 
-def get_body(addr, url, cert_checksum, user_agent=None, authorization=None, json=True):
-    context = make_pinned_ssl_context(cert_checksum)
+def get_body(addr, url, cert_checksum, user_agent=None, authorization=None, json=True, cafile=None):
+    context = make_pinned_ssl_context(cert_checksum, cafile=cafile)
     headers = {
         "User-Agent": "",  # Otherwise would send default User-Agent, that does fail
         **({"Authorization": str(authorization)[2:-1]} if authorization is not None else {}),
@@ -138,9 +139,17 @@ def get_body(addr, url, cert_checksum, user_agent=None, authorization=None, json
 
 
 def post_body(
-    addr, url, file_bytes, cert_checksum, user_agent=None, authorization=None, json=True, additional_headers=None
+    addr,
+    url,
+    file_bytes,
+    cert_checksum,
+    user_agent=None,
+    authorization=None,
+    json=True,
+    additional_headers=None,
+    cafile=None,
 ):
-    context = make_pinned_ssl_context(cert_checksum)
+    context = make_pinned_ssl_context(cert_checksum, cafile=cafile)
     form = MultiPartForm()
     form.add_file("file", "file.pdf", file_handle=BytesIO(file_bytes))
     body = bytes(form)
@@ -161,12 +170,8 @@ def usage(wrong_config=False, wrong_command=False, wrong_arg_len=False):
         TITLE,
         # TODO
         "─" * len(TITLE),
-        """~/.config/bank/config.json => {"accounts": [ACCOUNT_INFOS, ...], "certificates": {"qonto": "..."]}"""
-        "  - ACCOUNT_INFOS = {",
-        '    "id": "name-XXXX"',
-        '    "secret_key": "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"',
-        '    "local_store_path": "XX"',
-        "  - certificates = sha256sum of der_cert_bin",
+        "- bank help                         ==> show this help",
+        "  + config                          ==> helps you with the configuration file",
         "─" * len(TITLE),
         "- bank                              ==> gives accounts infos",
         "- bank transactions                 ==> list transactions for first account",
@@ -180,13 +185,60 @@ def usage(wrong_config=False, wrong_command=False, wrong_arg_len=False):
     return -1
 
 
+def help_config():
+    output_lines = [
+        TITLE,
+        "─" * len(TITLE),
+        "Configuration",
+        "─" * len(TITLE),
+        "",
+        f"{Color.PURP.value}Config file location:{Color.WHITE.value}",
+        "  ~/.config/bank/config.json",
+        "",
+        f"{Color.PURP.value}Example configuration:{Color.WHITE.value}",
+        "  {",
+        '    "accounts": [',
+        "      {",
+        '        "id": "organization-slug",',
+        '        "secret_key": "your_secret_key_here",',
+        '        "local_store_path": "optional_path"',
+        "      }",
+        "    ],",
+        '    "certificates": {',
+        '      "qonto": "sha256_hash_of_der_certificate"',
+        "    },",
+        f"    {Color.DIM.value}# Optional:{Color.WHITE.value}",
+        '    "ssl_cafile": "/path/to/ca-bundle.crt"',
+        "  }",
+        "",
+        f"{Color.PURP.value}Required fields:{Color.WHITE.value}",
+        "  • accounts[].id          - Organization slug from banking provider",
+        "  • accounts[].secret_key  - API secret key",
+        "  • certificates.qonto     - SHA256 hash of DER cert (64 hex chars)",
+        "",
+        f"{Color.PURP.value}Optional fields:{Color.WHITE.value}",
+        "  • ssl_cafile             - Path to system CA bundle",
+        "                             (e.g., /etc/ssl/certs/ca-certificates.crt)",
+        "                             Provides defense-in-depth with cert pinning",
+        "",
+        f"{Color.PURP.value}Cache location:{Color.WHITE.value}",
+        "  ~/.local/state/bank/transactions.json",
+        "  (XDG-compliant, file-locked for safe concurrent access)",
+        "",
+        "─" * len(TITLE),
+    ]
+    print("\n" + "\n".join(output_lines) + "\n")
+    return 0
+
+
 class Account:
-    def __init__(self, account_dict, cert_checksum):
+    def __init__(self, account_dict, cert_checksum, ssl_cafile=None):
         self.endpoint = b"thirdparty.qonto.com"
         account_keys = ["id", "secret_key", "local_store_path"]
         self.organization_slug, self.secret_key, self.local_store_path = (account_dict[k] for k in account_keys)
         self.account_infos = None
         self.cert_checksum = cert_checksum
+        self.ssl_cafile = ssl_cafile
 
     @property
     def auth_str(self):
@@ -194,7 +246,7 @@ class Account:
 
     def get_infos(self):
         self.account_infos = get_body(
-            self.endpoint, b"/v2/organization", self.cert_checksum, authorization=self.auth_str
+            self.endpoint, b"/v2/organization", self.cert_checksum, authorization=self.auth_str, cafile=self.ssl_cafile
         )
 
     def _subinfos_str(self, infos, level, last_key):
@@ -210,19 +262,55 @@ class Account:
         self.get_infos()
         print(f"{TITLE}\n{'─' * len(TITLE)}{self._subinfos_str(self.account_infos, 0, None)}")
 
-    def get_transaction_cache(self):
-        # TODO: Parameterize - no need to lock if clean overwrite
+    def _read_cache_unlocked(self):
+        """Read cache without acquiring lock - caller must hold lock"""
+        cache_path = Path.home() / ".local" / "state" / "bank" / "transactions.json"
         try:
-            with (Path.home() / ".config" / "bank" / "DIRTYCACHE.json").open() as f:
+            with cache_path.open() as f:
                 return loads(f.read())
-        except Exception:
+        except FileNotFoundError:
+            return {}
+
+    def get_transaction_cache(self):
+        cache_path = Path.home() / ".local" / "state" / "bank" / "transactions.json"
+        lock_path = cache_path.with_suffix(".lock")
+
+        try:
+            with lock_path.open("a") as lock:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_SH)  # Shared lock for reading
+                try:
+                    return self._read_cache_unlocked()
+                finally:
+                    fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        except FileNotFoundError:
             return {}
 
     def save_transaction_cache(self, obtained_transactions):
-        # TODO: Parameterize / lock / better overwrite
-        new_cache = {**self.get_transaction_cache(), **{t["transaction_id"]: t for t in obtained_transactions}}
-        with (Path.home() / ".config" / "bank" / "DIRTYCACHE.json").open("w") as f:
-            f.write(dumps(new_cache))
+        cache_path = Path.home() / ".local" / "state" / "bank" / "transactions.json"
+        lock_path = cache_path.with_suffix(".lock")
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Use separate lock file + atomic write for crash safety
+        with lock_path.open("a") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                # Read existing cache while already holding exclusive lock
+                existing = self._read_cache_unlocked()
+
+                # Merge data
+                new_cache = {**existing, **{t["transaction_id"]: t for t in obtained_transactions}}
+
+                # Atomic write via temp file
+                temp_path = cache_path.with_suffix(".tmp")
+                with temp_path.open("w") as f:
+                    f.write(dumps(new_cache))
+                    f.flush()
+                    os.fsync(f.fileno())  # Force to disk before rename
+
+                # Atomic rename - either old or new file exists, never partial
+                temp_path.rename(cache_path)
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
     def get_full_transactions(self, partial_id):
         return [v for k, v in self.get_transaction_cache().items() if k.endswith(partial_id)]
@@ -238,7 +326,7 @@ class Account:
 
     def show_attachments(self, transaction_id):
         url = b"/v2/transactions/" + transaction_id.encode() + b"/attachments"
-        pp(get_body(self.endpoint, url, self.cert_checksum, authorization=self.auth_str))
+        pp(get_body(self.endpoint, url, self.cert_checksum, authorization=self.auth_str, cafile=self.ssl_cafile))
 
     def justify(self, partial_id, file):
         transaction = self.get_one_transaction(partial_id)
@@ -252,6 +340,7 @@ class Account:
                 self.cert_checksum,
                 authorization=self.auth_str,
                 additional_headers={"X-Qonto-Idempotency-Key": idempo},  # TODO : consume this
+                cafile=self.ssl_cafile,
             )
         except Exception:
             raise
@@ -266,7 +355,9 @@ class Account:
             b"with_attachments=" + (b"true" if attachments else b"false") + b"&" if attachments is not None else b""
         )
         url = b"/v2/transactions?" + with_attachments_query + b"bank_account_id="
-        ts = get_body(self.endpoint, url + account_id, self.cert_checksum, authorization=self.auth_str)
+        ts = get_body(
+            self.endpoint, url + account_id, self.cert_checksum, authorization=self.auth_str, cafile=self.ssl_cafile
+        )
         self.save_transaction_cache(ts["transactions"])
         for t in ts["transactions"]:
             short_transaction_id = f" {t['transaction_id'][-6:]} "
@@ -297,7 +388,9 @@ class Config:
             for c in self.certificates.values()
         ):
             raise Exception  # TODO Better
-        self.accounts = [Account(a, self.certificates["qonto"]) for a in json["accounts"]]
+        # Optional: system CA bundle path for better TLS validation (in addition to cert pinning)
+        self.ssl_cafile = json.get("ssl_cafile")
+        self.accounts = [Account(a, self.certificates["qonto"], ssl_cafile=self.ssl_cafile) for a in json["accounts"]]
 
 
 # TODO implement or delete
@@ -309,6 +402,12 @@ class Config:
 
 
 def main():
+    # Check for help command before loading config
+    if len(argv) >= 2 and argv[1] == "help":
+        if len(argv) == 3 and argv[2] == "config":
+            return help_config()
+        return usage()
+
     try:
         with (Path.home() / ".config" / "bank" / "config.json").open() as f:
             config = Config(f.read())
