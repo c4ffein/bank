@@ -226,6 +226,9 @@ def help_config():
         "  ~/.local/state/bank/transactions.json",
         "  (XDG-compliant, file-locked for safe concurrent access)",
         "",
+        f"{Color.PURP.value}Limitations:{Color.WHITE.value}",
+        "  • Only single account supported (multi-account planned for future)",
+        "",
         "─" * len(TITLE),
     ]
     print("\n" + "\n".join(output_lines) + "\n")
@@ -428,6 +431,10 @@ class Config:
         # Optional: system CA bundle path for better TLS validation (in addition to cert pinning)
         self.ssl_cafile = json.get("ssl_cafile")
         self.accounts = [Account(a, self.certificates["qonto"], ssl_cafile=self.ssl_cafile) for a in json["accounts"]]
+
+        # Currently only single account is supported
+        if len(self.accounts) != 1:
+            raise BankException(f"Only single account supported, found {len(self.accounts)} in config")
 
 
 # TODO implement or delete
