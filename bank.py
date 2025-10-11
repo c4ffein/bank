@@ -127,6 +127,15 @@ class BankException(Exception):
     pass
 
 
+def currency_symbol(code: str) -> str:
+    """Convert currency code to symbol. Returns '?' for unknown currencies."""
+    symbols = {
+        "EUR": "€",
+        "USD": "$",
+    }
+    return symbols.get(code, "?")
+
+
 @dataclass
 class Transaction:
     """
@@ -668,7 +677,8 @@ class Account:
                 currency_code = t.currency
             money_str = Color.RED.value if t.side == "debit" else Color.GREEN.value
             sign = "-" if t.side == "debit" else "+"
-            money_str += f" {sign}{money // 100},{str(money % 100).zfill(2)} {currency_code} "
+            symbol = currency_symbol(currency_code)
+            money_str += f" {sign}{money // 100},{str(money % 100).zfill(2)} {symbol} "
             emitted_at = f" {t.emitted_at[:10]}"
             print(
                 f"{Color.DIM.value}─"
