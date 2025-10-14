@@ -145,7 +145,7 @@ def validate_uuid(uuid_string: str) -> None:
     if len(uuid_string) != 36:
         raise BankException(f"Invalid UUID format: expected 36 characters, got {len(uuid_string)}")
     if not all(c in "0123456789abcdef-" for c in uuid_string.lower()):
-        raise BankException(f"Invalid UUID format: contains invalid characters")
+        raise BankException("Invalid UUID format: contains invalid characters")
     # UUID format: 8-4-4-4-12 with hyphens
     parts = uuid_string.split("-")
     if len(parts) != 5 or [len(p) for p in parts] != [8, 4, 4, 4, 12]:
@@ -611,38 +611,28 @@ class Account:
 
         # Get attachments list
         url = b"/v2/transactions/" + transaction_id.encode() + b"/attachments"
-        response = get_body(
-            self.endpoint, url, self.cert_checksum, authorization=self.auth_str, cafile=self.ssl_cafile
-        )
+        response = get_body(self.endpoint, url, self.cert_checksum, authorization=self.auth_str, cafile=self.ssl_cafile)
 
         attachments = response.get("attachments", [])
         if not attachments:
             print(f"{Color.DIM.value}No attachments found for transaction {transaction_id[-6:]}{Color.WHITE.value}")
             return
-
         # Set up output directory
-        if output_dir is None:
-            output_dir = Path.cwd()
-        else:
-            output_dir = Path(output_dir)
+        output_dir = Path.cwd() if output_dir is None else Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
-
         print(f"{Color.DIM.value}Found {len(attachments)} attachment(s) for transaction {transaction_id[-6:]}")
         print(f"Downloading to: {Color.WHITE.value}{output_dir}{Color.DIM.value}")
-
         # Download each attachment
         for i, attachment in enumerate(attachments, 1):
             # Always use safe filename format - don't trust API-provided names
             file_name = f"attachment_{transaction_id}_{i}"
-
             # Use pre-signed S3 URL from API response
             download_url = attachment.get("url")
             if not download_url:
                 print(f"{Color.RED.value}✗ No download URL for {file_name}{Color.WHITE.value}")
                 continue
-
-            print(f"{Color.DIM.value}[{i}/{len(attachments)}] Downloading: {Color.WHITE.value}{file_name}{Color.DIM.value}...")
-
+            DIM, WHITE = Color.DIM.value, Color.WHITE.value
+            print(f"{DIM}[{i}/{len(attachments)}] Downloading: {WHITE}{file_name}{DIM}...")
             try:
                 # Download file from S3 with certificate pinning - required for security
                 if not self.s3_cert_checksum:
@@ -654,21 +644,17 @@ class Account:
                 request = Request(download_url)
                 with urlopen(request, context=context) as response:
                     file_data = response.read()
-
                 # Save to disk
                 output_path = output_dir / file_name
                 with output_path.open("wb") as f:
                     f.write(file_data)
-
                 file_size_kb = len(file_data) / 1024
                 print(
                     f"{Color.GREEN.value}✓ {Color.WHITE.value}{file_name} "
                     f"{Color.DIM.value}({file_size_kb:.1f} KB){Color.WHITE.value}"
                 )
-
             except Exception as e:
                 print(f"{Color.RED.value}✗ Failed to download {file_name}: {e}{Color.WHITE.value}")
-
         print(f"{Color.GREEN.value}Download complete!{Color.WHITE.value}")
 
     def get_attachment_hashes(self, partial_id):
@@ -683,9 +669,7 @@ class Account:
         validate_uuid(transaction_id)
         # Get attachments list
         url = b"/v2/transactions/" + transaction_id.encode() + b"/attachments"
-        response = get_body(
-            self.endpoint, url, self.cert_checksum, authorization=self.auth_str, cafile=self.ssl_cafile
-        )
+        response = get_body(self.endpoint, url, self.cert_checksum, authorization=self.auth_str, cafile=self.ssl_cafile)
         attachments = response.get("attachments", [])
         if not attachments:
             print(f"{Color.DIM.value}No attachments found for transaction {transaction_id[-6:]}{Color.WHITE.value}")
@@ -892,7 +876,9 @@ class Config:
                 if field not in account:
                     raise BankException(f"Missing '{field}' in account #{i + 1}")
         self.accounts = [
-            Account(a, self.certificates["qonto"], s3_cert_checksum=self.certificates["aws_s3"], ssl_cafile=self.ssl_cafile)
+            Account(
+                a, self.certificates["qonto"], s3_cert_checksum=self.certificates["aws_s3"], ssl_cafile=self.ssl_cafile
+            )
             for a in json["accounts"]
         ]
         # Currently only single account is supported
