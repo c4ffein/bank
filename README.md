@@ -20,8 +20,12 @@ bank - KISS banking client
   + date>=2024                      ==> transactions from 2024 onwards
   + date<2024                       ==> transactions before 2024
   + date>=2023 date<2025            ==> transactions in range
-- bank j       end_of_id file_path  ==> add a file to a transaction by the end of its id
-- bank justify end_of_id file_path  ==> add a file to a transaction by the end of its id
+- bank j        end_of_id file_path ==> add a file to a transaction by the end of its id
+- bank justify  end_of_id file_path ==> add a file to a transaction by the end of its id
+- bank d        end_of_id [out_dir] ==> download attachments for a transaction
+- bank download end_of_id [out_dir] ==> download attachments for a transaction
+- bank hash     end_of_id           ==> show SHA256 hashes of attachments
+- bank sha256   end_of_id           ==> show SHA256 hashes of attachments
 ──────────────────────────
 Only working with Qonto for now, for my specific use-cases
 ```
