@@ -136,6 +136,22 @@ def currency_symbol(code: str) -> str:
     return symbols.get(code, "?")
 
 
+def validate_uuid(uuid_string: str) -> None:
+    """
+    Validate that a string is a properly formatted UUID.
+
+    Raises BankException if invalid.
+    """
+    if len(uuid_string) != 36:
+        raise BankException(f"Invalid UUID format: expected 36 characters, got {len(uuid_string)}")
+    if not all(c in "0123456789abcdef-" for c in uuid_string.lower()):
+        raise BankException(f"Invalid UUID format: contains invalid characters")
+    # UUID format: 8-4-4-4-12 with hyphens
+    parts = uuid_string.split("-")
+    if len(parts) != 5 or [len(p) for p in parts] != [8, 4, 4, 4, 12]:
+        raise BankException(f"Invalid UUID format: expected 8-4-4-4-12 format, got {uuid_string}")
+
+
 @dataclass
 class Transaction:
     """
@@ -392,8 +408,12 @@ def usage(wrong_config=False, wrong_command=False, wrong_arg_len=False):
         "  + date>=2024                      ==> transactions from 2024 onwards",
         "  + date<2024                       ==> transactions before 2024",
         "  + date>=2023 date<2025            ==> transactions in range",
-        "- bank j       end_of_id file_path  ==> add a file to a transaction by the end of its id",
-        "- bank justify end_of_id file_path  ==> add a file to a transaction by the end of its id",
+        "- bank j        end_of_id file_path ==> add a file to a transaction by the end of its id",
+        "- bank justify  end_of_id file_path ==> add a file to a transaction by the end of its id",
+        "- bank d        end_of_id [out_dir] ==> download attachments for a transaction",
+        "- bank download end_of_id [out_dir] ==> download attachments for a transaction",
+        "- bank hash     end_of_id           ==> show SHA256 hashes of attachments",
+        "- bank sha256   end_of_id           ==> show SHA256 hashes of attachments",
         "─" * len(TITLE),
         "Only working with Qonto for now, for my specific use-cases",
     ]
@@ -421,7 +441,8 @@ def help_config():
         "      }",
         "    ],",
         '    "certificates": {',
-        '      "qonto": "sha256_hash_of_der_certificate"',
+        '      "qonto": "sha256_hash_of_qonto_der_certificate",',
+        '      "aws_s3": "sha256_hash_of_s3_der_certificate"',
         "    },",
         f"    {Color.DIM.value}# Optional:{Color.WHITE.value}",
         '    "ssl_cafile": "/path/to/ca-bundle.crt"',
@@ -430,9 +451,11 @@ def help_config():
         f"{Color.PURP.value}Required fields:{Color.WHITE.value}",
         "  • accounts[].id          - Organization slug from banking provider",
         "  • accounts[].secret_key  - API secret key",
-        "  • certificates.qonto     - SHA256 hash of DER cert (64 hex chars)",
+        "  • certificates.qonto     - SHA256 hash of Qonto API DER cert (64 hex chars)",
         "",
         f"{Color.PURP.value}Optional fields:{Color.WHITE.value}",
+        "  • certificates.aws_s3    - SHA256 hash of AWS S3 DER cert",
+        "                             (REQUIRED for download/hash commands)",
         "  • ssl_cafile             - Path to system CA bundle",
         "                             (e.g., /etc/ssl/certs/ca-certificates.crt)",
         "                             Provides defense-in-depth with cert pinning",
@@ -458,13 +481,14 @@ class Account:
     Uses certificate pinning for secure API communication.
     """
 
-    def __init__(self, account_dict, cert_checksum, ssl_cafile=None):
+    def __init__(self, account_dict, cert_checksum, s3_cert_checksum=None, ssl_cafile=None):
         """
         Initialize an Account instance.
 
         Args:
             account_dict: Dict containing 'id', 'secret_key', and 'local_store_path'
-            cert_checksum: SHA256 hash of the pinned certificate
+            cert_checksum: SHA256 hash of the pinned certificate for Qonto API
+            s3_cert_checksum: SHA256 hash of the pinned certificate for AWS S3
             ssl_cafile: Optional path to CA bundle file for additional TLS verification
         """
         self.endpoint = b"thirdparty.qonto.com"
@@ -472,6 +496,7 @@ class Account:
         self.organization_slug, self.secret_key, self.local_store_path = (account_dict[k] for k in account_keys)
         self.account_infos = None
         self.cert_checksum = cert_checksum
+        self.s3_cert_checksum = s3_cert_checksum
         self.ssl_cafile = ssl_cafile
 
     @property
@@ -565,9 +590,148 @@ class Account:
     def show(self, partial_id):
         pp(self.get_one_transaction(partial_id))
 
-    def show_attachments(self, transaction_id):
+    def show_attachments(self, partial_id):
+        transaction = self.get_one_transaction(partial_id)
+        transaction_id = transaction["id"]
+        validate_uuid(transaction_id)
         url = b"/v2/transactions/" + transaction_id.encode() + b"/attachments"
         pp(get_body(self.endpoint, url, self.cert_checksum, authorization=self.auth_str, cafile=self.ssl_cafile))
+
+    def download_attachments(self, partial_id, output_dir=None):
+        """
+        Download all attachments for a transaction.
+
+        Args:
+            partial_id: Partial transaction ID to match
+            output_dir: Directory to save files (default: current directory)
+        """
+        transaction = self.get_one_transaction(partial_id)
+        transaction_id = transaction["id"]
+        validate_uuid(transaction_id)
+
+        # Get attachments list
+        url = b"/v2/transactions/" + transaction_id.encode() + b"/attachments"
+        response = get_body(
+            self.endpoint, url, self.cert_checksum, authorization=self.auth_str, cafile=self.ssl_cafile
+        )
+
+        attachments = response.get("attachments", [])
+        if not attachments:
+            print(f"{Color.DIM.value}No attachments found for transaction {transaction_id[-6:]}{Color.WHITE.value}")
+            return
+
+        # Set up output directory
+        if output_dir is None:
+            output_dir = Path.cwd()
+        else:
+            output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        print(f"{Color.DIM.value}Found {len(attachments)} attachment(s) for transaction {transaction_id[-6:]}")
+        print(f"Downloading to: {Color.WHITE.value}{output_dir}{Color.DIM.value}")
+
+        # Download each attachment
+        for i, attachment in enumerate(attachments, 1):
+            # Always use safe filename format - don't trust API-provided names
+            file_name = f"attachment_{transaction_id}_{i}"
+
+            # Use pre-signed S3 URL from API response
+            download_url = attachment.get("url")
+            if not download_url:
+                print(f"{Color.RED.value}✗ No download URL for {file_name}{Color.WHITE.value}")
+                continue
+
+            print(f"{Color.DIM.value}[{i}/{len(attachments)}] Downloading: {Color.WHITE.value}{file_name}{Color.DIM.value}...")
+
+            try:
+                # Download file from S3 with certificate pinning - required for security
+                if not self.s3_cert_checksum:
+                    raise BankException(
+                        "S3 certificate pinning not configured. Add 'aws_s3' certificate to config. "
+                        "See 'bank help config' for details."
+                    )
+                context = make_pinned_ssl_context(self.s3_cert_checksum, cafile=self.ssl_cafile)
+                request = Request(download_url)
+                with urlopen(request, context=context) as response:
+                    file_data = response.read()
+
+                # Save to disk
+                output_path = output_dir / file_name
+                with output_path.open("wb") as f:
+                    f.write(file_data)
+
+                file_size_kb = len(file_data) / 1024
+                print(
+                    f"{Color.GREEN.value}✓ {Color.WHITE.value}{file_name} "
+                    f"{Color.DIM.value}({file_size_kb:.1f} KB){Color.WHITE.value}"
+                )
+
+            except Exception as e:
+                print(f"{Color.RED.value}✗ Failed to download {file_name}: {e}{Color.WHITE.value}")
+
+        print(f"{Color.GREEN.value}Download complete!{Color.WHITE.value}")
+
+    def get_attachment_hashes(self, partial_id):
+        """
+        Download and display SHA256 hashes of all attachments for a transaction.
+
+        Args:
+            partial_id: Partial transaction ID to match
+        """
+        transaction = self.get_one_transaction(partial_id)
+        transaction_id = transaction["id"]
+        validate_uuid(transaction_id)
+
+        # Get attachments list
+        url = b"/v2/transactions/" + transaction_id.encode() + b"/attachments"
+        response = get_body(
+            self.endpoint, url, self.cert_checksum, authorization=self.auth_str, cafile=self.ssl_cafile
+        )
+
+        attachments = response.get("attachments", [])
+        if not attachments:
+            print(f"{Color.DIM.value}No attachments found for transaction {transaction_id[-6:]}{Color.WHITE.value}")
+            return
+
+        print(f"{Color.DIM.value}Found {len(attachments)} attachment(s) for transaction {transaction_id[-6:]}{Color.WHITE.value}")
+        print()
+
+        # Download and hash each attachment
+        for i, attachment in enumerate(attachments, 1):
+            # Always use safe filename format - don't trust API-provided names
+            file_name = f"attachment_{transaction_id}_{i}"
+
+            # Use pre-signed S3 URL from API response
+            download_url = attachment.get("url")
+            if not download_url:
+                print(f"{Color.RED.value}[{i}] ✗ No download URL for {file_name}{Color.WHITE.value}")
+                print()
+                continue
+
+            try:
+                # Download file from S3 with certificate pinning - required for security
+                if not self.s3_cert_checksum:
+                    raise BankException(
+                        "S3 certificate pinning not configured. Add 'aws_s3' certificate to config. "
+                        "See 'bank help config' for details."
+                    )
+                context = make_pinned_ssl_context(self.s3_cert_checksum, cafile=self.ssl_cafile)
+                request = Request(download_url)
+                with urlopen(request, context=context) as response:
+                    file_data = response.read()
+
+                # Calculate SHA256 hash
+                file_hash = sha256(file_data).hexdigest()
+                file_size_kb = len(file_data) / 1024
+
+                print(f"{Color.PURP.value}[{i}] {Color.WHITE.value}{file_name}")
+                print(f"{Color.DIM.value}    Size: {Color.WHITE.value}{file_size_kb:.1f} KB")
+                print(f"{Color.DIM.value}    SHA256: {Color.GREEN.value}{file_hash}{Color.WHITE.value}")
+                print()
+
+            except Exception as e:
+                print(f"{Color.RED.value}[{i}] ✗ Failed to hash {file_name}: {e}{Color.WHITE.value}")
+                print()
 
     def _log_justify_attempt(self, transaction_id, idempotency_key, file_size, status, error=None):
         """Log justify attempt to file for recovery"""
@@ -590,6 +754,7 @@ class Account:
     def justify(self, partial_id, file):
         transaction = self.get_one_transaction(partial_id)
         transaction_id = transaction["id"]
+        validate_uuid(transaction_id)
         idempo = str(uuid4())
         file_size = len(file)
 
@@ -712,7 +877,19 @@ class Config:
             raise BankException(f"Certificate must be 64 hex characters, got {len(qonto_cert)}")
         if any(c not in "0123456789abcdef" for c in qonto_cert):
             raise BankException("Certificate must contain only hexadecimal characters (0-9, a-f)")
-        self.certificates = {"qonto": qonto_cert}
+
+        # Optional: AWS S3 certificate for attachment downloads
+        s3_cert = json["certificates"].get("aws_s3")
+        if s3_cert is not None:
+            if not isinstance(s3_cert, str):
+                raise BankException(f"S3 certificate must be a string, got {type(s3_cert).__name__}")
+            s3_cert = s3_cert.lower()
+            if len(s3_cert) != 64:
+                raise BankException(f"S3 certificate must be 64 hex characters, got {len(s3_cert)}")
+            if any(c not in "0123456789abcdef" for c in s3_cert):
+                raise BankException("S3 certificate must contain only hexadecimal characters (0-9, a-f)")
+
+        self.certificates = {"qonto": qonto_cert, "aws_s3": s3_cert}
         # Optional: system CA bundle path for better TLS validation (in addition to cert pinning)
         self.ssl_cafile = json.get("ssl_cafile")
         # Validate accounts
@@ -725,7 +902,10 @@ class Config:
             for field in ["id", "secret_key", "local_store_path"]:
                 if field not in account:
                     raise BankException(f"Missing '{field}' in account #{i + 1}")
-        self.accounts = [Account(a, self.certificates["qonto"], ssl_cafile=self.ssl_cafile) for a in json["accounts"]]
+        self.accounts = [
+            Account(a, self.certificates["qonto"], s3_cert_checksum=self.certificates["aws_s3"], ssl_cafile=self.ssl_cafile)
+            for a in json["accounts"]
+        ]
         # Currently only single account is supported
         if len(self.accounts) != 1:
             raise BankException(f"Only single account supported, found {len(self.accounts)} in config")
@@ -773,6 +953,15 @@ def main():
         with Path(argv[3]).open("rb") as f:
             file = f.read()
         return config.accounts[0].justify(argv[2], file)
+    if argv[1] == "download" or argv[1] == "d":
+        if len(argv) < 3 or len(argv) > 4:
+            return usage()
+        output_dir = argv[3] if len(argv) == 4 else None
+        return config.accounts[0].download_attachments(argv[2], output_dir)
+    if argv[1] == "sha256" or argv[1] == "hash":
+        if len(argv) != 3:
+            return usage()
+        return config.accounts[0].get_attachment_hashes(argv[2])
     return usage()
 
 
