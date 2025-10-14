@@ -681,35 +681,28 @@ class Account:
         transaction = self.get_one_transaction(partial_id)
         transaction_id = transaction["id"]
         validate_uuid(transaction_id)
-
         # Get attachments list
         url = b"/v2/transactions/" + transaction_id.encode() + b"/attachments"
         response = get_body(
             self.endpoint, url, self.cert_checksum, authorization=self.auth_str, cafile=self.ssl_cafile
         )
-
         attachments = response.get("attachments", [])
         if not attachments:
             print(f"{Color.DIM.value}No attachments found for transaction {transaction_id[-6:]}{Color.WHITE.value}")
             return
-
-        print(f"{Color.DIM.value}Found {len(attachments)} attachment(s) for transaction {transaction_id[-6:]}{Color.WHITE.value}")
-        print()
-
+        DIM, WHITE = Color.DIM.value, Color.WHITE.value
+        print(f"{DIM}Found {len(attachments)} attachment(s) for transaction {transaction_id[-6:]}{WHITE}\n")
         # Download and hash each attachment
         for i, attachment in enumerate(attachments, 1):
             # Always use safe filename format - don't trust API-provided names
             file_name = f"attachment_{transaction_id}_{i}"
-
             # Use pre-signed S3 URL from API response
             download_url = attachment.get("url")
             if not download_url:
                 print(f"{Color.RED.value}[{i}] ✗ No download URL for {file_name}{Color.WHITE.value}")
                 print()
                 continue
-
             try:
-                # Download file from S3 with certificate pinning - required for security
                 if not self.s3_cert_checksum:
                     raise BankException(
                         "S3 certificate pinning not configured. Add 'aws_s3' certificate to config. "
@@ -719,16 +712,12 @@ class Account:
                 request = Request(download_url)
                 with urlopen(request, context=context) as response:
                     file_data = response.read()
-
                 # Calculate SHA256 hash
                 file_hash = sha256(file_data).hexdigest()
                 file_size_kb = len(file_data) / 1024
-
                 print(f"{Color.PURP.value}[{i}] {Color.WHITE.value}{file_name}")
                 print(f"{Color.DIM.value}    Size: {Color.WHITE.value}{file_size_kb:.1f} KB")
-                print(f"{Color.DIM.value}    SHA256: {Color.GREEN.value}{file_hash}{Color.WHITE.value}")
-                print()
-
+                print(f"{Color.DIM.value}    SHA256: {Color.GREEN.value}{file_hash}{Color.WHITE.value}\n")
             except Exception as e:
                 print(f"{Color.RED.value}[{i}] ✗ Failed to hash {file_name}: {e}{Color.WHITE.value}")
                 print()
