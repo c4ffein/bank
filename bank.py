@@ -34,6 +34,7 @@ from ssl import (
 )
 from sys import argv, exit
 from sys import flags as sys_flags
+from urllib.error import URLError
 from urllib.request import Request, urlopen
 from uuid import uuid4
 
@@ -334,25 +335,56 @@ def parse_date_params(args: list[str]) -> DateFilter:
     return filter_obj
 
 
-def get_body(addr, url, cert_checksum, user_agent=None, authorization=None, json=None, cafile=None):
+def request_body(
+    method,
+    addr,
+    url,
+    cert_checksum,
+    file_bytes=None,
+    user_agent=None,
+    authorization=None,
+    json=None,
+    additional_headers=None,
+    cafile=None,
+):
     """
-    Fetch data from API endpoint.
+    Send an HTTP request to an API endpoint.
 
     Args:
+        method: "GET" or "POST".
         json: If True, parse as JSON. If False, return raw bytes.
               If None (default), auto-detect from Content-Type header.
     """
-    context = make_pinned_ssl_context(cert_checksum, cafile=cafile)
-    headers = {
-        "User-Agent": "",  # Otherwise would send default User-Agent, that does fail
-        **({"Authorization": str(authorization)[2:-1]} if authorization is not None else {}),
-    }
-    r = urlopen(Request("https://" + (addr + url).decode(), None, headers=headers), context=context)
+    try:
+        context = make_pinned_ssl_context(cert_checksum, cafile=cafile)
+        headers = {
+            "User-Agent": "",  # Otherwise would send default User-Agent, that does fail
+            **({"Authorization": str(authorization)[2:-1]} if authorization is not None else {}),
+            **(additional_headers or {}),
+        }
+        body = None
+        if file_bytes is not None:
+            form = MultiPartForm()
+            form.add_file("file", "file.pdf", file_handle=BytesIO(file_bytes))
+            body = bytes(form)
+            headers["Content-Type"] = f"multipart/form-data; boundary={form.boundary.decode()}"
+        request = Request("https://" + (addr + url).decode(), body, headers=headers, method=method)
+        r = urlopen(request, context=context)
+    except SSLCertVerificationError as e:
+        raise BankException(f"SSL certificate error: {e}") from e
+    except URLError as e:
+        raise BankException(f"Connection error: {e.reason}") from e
     # Auto-detect JSON from Content-Type header if not explicitly specified
     if json is None:
         content_type = r.headers.get("Content-Type", "")
         json = "application/json" in content_type
     return loads(r.read()) if json else r.read()
+
+
+def get_body(addr, url, cert_checksum, user_agent=None, authorization=None, json=None, cafile=None):
+    return request_body(
+        "GET", addr, url, cert_checksum, user_agent=user_agent, authorization=authorization, json=json, cafile=cafile
+    )
 
 
 def post_body(
@@ -366,30 +398,18 @@ def post_body(
     additional_headers=None,
     cafile=None,
 ):
-    """
-    POST data to API endpoint (typically for file uploads).
-
-    Args:
-        json: If True, parse as JSON. If False, return raw bytes.
-              If None (default), auto-detect from Content-Type header.
-    """
-    context = make_pinned_ssl_context(cert_checksum, cafile=cafile)
-    form = MultiPartForm()
-    form.add_file("file", "file.pdf", file_handle=BytesIO(file_bytes))
-    body = bytes(form)
-    headers = {
-        "User-Agent": "",  # Otherwise would send default User-Agent, that does fail
-        "Content-Type": f"multipart/form-data; boundary={form.boundary.decode()}",  # Needed for file upload
-        **({"Authorization": str(authorization)[2:-1]} if authorization is not None else {}),
-        **(additional_headers or {}),
-    }
-    request = Request("https://" + (addr + url).decode(), body, headers=headers)
-    r = urlopen(request, context=context)
-    # Auto-detect JSON from Content-Type header if not explicitly specified
-    if json is None:
-        content_type = r.headers.get("Content-Type", "")
-        json = "application/json" in content_type
-    return loads(r.read()) if json else r.read()
+    return request_body(
+        "POST",
+        addr,
+        url,
+        cert_checksum,
+        file_bytes=file_bytes,
+        user_agent=user_agent,
+        authorization=authorization,
+        json=json,
+        additional_headers=additional_headers,
+        cafile=cafile,
+    )
 
 
 def usage(wrong_config=False, wrong_command=False, wrong_arg_len=False):
