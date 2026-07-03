@@ -12,7 +12,7 @@ import mimetypes
 import os
 from binascii import hexlify
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 from hashlib import sha256
 from io import BytesIO
@@ -732,7 +732,7 @@ class Account:
         log_path.parent.mkdir(parents=True, exist_ok=True)
 
         log_entry = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
             "transaction_id": transaction_id,
             "idempotency_key": idempotency_key,
             "file_size": file_size,
