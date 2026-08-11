@@ -10,6 +10,7 @@ WARNING: I don't recommand using this as-is. This a PoC, and usable by me becaus
 import fcntl
 import mimetypes
 import os
+import tempfile
 from binascii import hexlify
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -586,15 +587,23 @@ class Account:
                 # Merge data
                 new_cache = {**existing, **{t["transaction_id"]: t for t in obtained_transactions}}
 
-                # Atomic write via temp file
+                # Atomic write via temp file, created 0o600 up front (financial data must not be world-readable)
                 temp_path = cache_path.with_suffix(".tmp")
-                with temp_path.open("w") as f:
+                fd = os.open(temp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                with os.fdopen(fd, "w") as f:
                     f.write(dumps(new_cache))
                     f.flush()
-                    os.fsync(f.fileno())  # Force to disk before rename
+                    os.fsync(f.fileno())  # force file contents to disk before the swap
 
-                # Atomic rename - either old or new file exists, never partial
-                temp_path.rename(cache_path)
+                # Atomic replace - readers see either the whole old or whole new file, never partial
+                temp_path.replace(cache_path)
+
+                # fsync the directory too, so the rename itself survives a crash (not just the file contents)
+                dir_fd = os.open(cache_path.parent, os.O_RDONLY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
             finally:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
@@ -664,10 +673,22 @@ class Account:
                 request = Request(download_url)
                 with urlopen(request, context=context) as response:
                     file_data = response.read()
-                # Save to disk
+                # Save to disk atomically - temp file in same dir + rename, kept 0o600 (financial documents)
                 output_path = output_dir / file_name
-                with output_path.open("wb") as f:
-                    f.write(file_data)
+                temp_fd, temp_name = tempfile.mkstemp(dir=output_dir, prefix=f".{file_name}.")
+                temp_path = Path(temp_name)
+                try:
+                    try:
+                        os.write(temp_fd, file_data)
+                    finally:
+                        os.close(temp_fd)
+                    temp_path.replace(output_path)  # Atomic rename - either old or new file exists, never partial
+                except BaseException:
+                    try:
+                        temp_path.unlink()
+                    except OSError:
+                        pass
+                    raise
                 file_size_kb = len(file_data) / 1024
                 print(
                     f"{Color.GREEN.value}✓ {Color.WHITE.value}{file_name} "
