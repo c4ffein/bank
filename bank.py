@@ -10,11 +10,13 @@ WARNING: I don't recommand using this as-is. This a PoC, and usable by me becaus
 import fcntl
 import mimetypes
 import os
+import subprocess
 import tempfile
 from binascii import hexlify
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
+from functools import cache
 from hashlib import sha256
 from io import BytesIO
 from itertools import chain
@@ -45,6 +47,10 @@ COLOR_LEN = 4
 
 
 TITLE = "bank - KISS banking client"
+
+HEX_CHARS = frozenset("0123456789abcdef")
+PIN_COMMAND_TIMEOUT = 10  # seconds
+PIN_COMMAND_MAX_PINS = 16  # the old and the new certificate overlap during a rotation: a few, never many
 
 
 class MultiPartForm:
@@ -83,14 +89,17 @@ def make_pinned_ssl_context(pinned_sha_256, cafile=None, capath=None, cadata=Non
     """
     Returns an instance of a subclass of SSLContext that uses a subclass of SSLSocket
     that actually verifies the sha256 of the certificate during the TLS handshake
+    pinned_sha_256 is a hex digest, or several of them: any is accepted (certificates overlap during a rotation)
     Tested with `python-version: [3.8, 3.9, 3.10, 3.11, 3.12, 3.13]`
     Original code can be found at https://github.com/c4ffein/python-snippets
     """
 
+    pinned = frozenset((pinned_sha_256,) if isinstance(pinned_sha_256, str) else pinned_sha_256)
+
     class PinnedSSLSocket(SSLSocket):
         def check_pinned_cert(self):
             der_cert_bin = self.getpeercert(True)
-            if sha256(der_cert_bin).hexdigest() != pinned_sha_256:
+            if sha256(der_cert_bin).hexdigest() not in pinned:
                 raise SSLCertVerificationError("Incorrect certificate checksum")
 
         def do_handshake(self, *args, **kwargs):
@@ -127,6 +136,50 @@ def make_pinned_ssl_context(pinned_sha_256, cafile=None, capath=None, cadata=Non
 
 class BankException(Exception):
     pass
+
+
+def validate_pin_command(value, label):
+    """
+    A configured certificate is a command, as a list (an argv), that prints the SHA256s to accept: see resolve_pins.
+    Returned as a tuple (hashable: resolve_pins caches on it).
+    """
+    if not isinstance(value, list):
+        raise BankException(f"{label} must be a command (list of strings), got {type(value).__name__}")
+    if not value or not all(isinstance(arg, str) and arg and "\0" not in arg for arg in value):
+        raise BankException(f"{label} command must be a non-empty list of non-empty strings")
+    return tuple(value)
+
+
+@cache
+def resolve_pins(command):
+    """
+    The SHA256 pins to accept for a certificate, as a tuple: what its configured command (an argv tuple) prints.
+    It is run as it is, without a shell, once per run, when a connection needs it. What is expected is what
+    tls-pin-get (https://github.com/c4ffein/crypto) does: exit code 0, and one SHA256 per line on stdout.
+    Anything else (a failure, no pin, a line that is not a SHA256) is an error: no connection is made.
+    """
+    shown = " ".join(command)
+    try:
+        result = subprocess.run(command, stdin=subprocess.DEVNULL, capture_output=True, timeout=PIN_COMMAND_TIMEOUT)
+    except subprocess.TimeoutExpired as e:
+        raise BankException(f"Pin command timed out after {PIN_COMMAND_TIMEOUT}s: {shown}") from e
+    except (OSError, ValueError) as e:
+        raise BankException(f"Pin command could not be run: {shown}: {e}") from e
+    if result.returncode != 0:
+        detail = " ".join(result.stderr.decode(errors="replace").split())[:200]
+        detail = "".join(c if c.isprintable() else "?" for c in detail)
+        raise BankException(f"Pin command failed (exit code {result.returncode}): {shown}{detail and ': ' + detail}")
+    try:
+        pins = tuple(line.lower() for line in result.stdout.decode("ascii").removesuffix("\n").split("\n"))
+    except UnicodeDecodeError as e:
+        raise BankException(f"Pin command printed something that is not a SHA256: {shown}") from e
+    if pins == ("",):
+        raise BankException(f"Pin command printed no pin: {shown}")
+    if len(pins) > PIN_COMMAND_MAX_PINS:
+        raise BankException(f"Pin command printed more than {PIN_COMMAND_MAX_PINS} pins: {shown}")
+    if any(len(pin) != 64 or any(c not in HEX_CHARS for c in pin) for pin in pins):
+        raise BankException(f"Pin command printed something that is not a SHA256: {shown}")
+    return pins
 
 
 def currency_symbol(code: str) -> str:
@@ -340,7 +393,7 @@ def request_body(
     method,
     addr,
     url,
-    cert_checksum,
+    pin_command,
     file_bytes=None,
     user_agent=None,
     authorization=None,
@@ -357,7 +410,7 @@ def request_body(
               If None (default), auto-detect from Content-Type header.
     """
     try:
-        context = make_pinned_ssl_context(cert_checksum, cafile=cafile)
+        context = make_pinned_ssl_context(resolve_pins(pin_command), cafile=cafile)
         headers = {
             "User-Agent": "",  # Otherwise would send default User-Agent, that does fail
             **({"Authorization": str(authorization)[2:-1]} if authorization is not None else {}),
@@ -382,9 +435,9 @@ def request_body(
     return loads(r.read()) if json else r.read()
 
 
-def get_body(addr, url, cert_checksum, user_agent=None, authorization=None, json=None, cafile=None):
+def get_body(addr, url, pin_command, user_agent=None, authorization=None, json=None, cafile=None):
     return request_body(
-        "GET", addr, url, cert_checksum, user_agent=user_agent, authorization=authorization, json=json, cafile=cafile
+        "GET", addr, url, pin_command, user_agent=user_agent, authorization=authorization, json=json, cafile=cafile
     )
 
 
@@ -392,7 +445,7 @@ def post_body(
     addr,
     url,
     file_bytes,
-    cert_checksum,
+    pin_command,
     user_agent=None,
     authorization=None,
     json=None,
@@ -403,7 +456,7 @@ def post_body(
         "POST",
         addr,
         url,
-        cert_checksum,
+        pin_command,
         file_bytes=file_bytes,
         user_agent=user_agent,
         authorization=authorization,
@@ -462,8 +515,8 @@ def help_config():
         "      }",
         "    ],",
         '    "certificates": {',
-        '      "qonto": "sha256_hash_of_qonto_der_certificate",',
-        '      "aws_s3": "sha256_hash_of_s3_der_certificate"',
+        '      "qonto": ["/home/you/.local/bin/tls-pin-get", "thirdparty.qonto.com:443"],',
+        '      "aws_s3": ["/home/you/.local/bin/tls-pin-get", "qonto.s3.eu-central-1.amazonaws.com:443"]',
         "    },",
         f"    {Color.DIM.value}# Optional:{Color.WHITE.value}",
         '    "ssl_cafile": "/path/to/ca-bundle.crt"',
@@ -472,14 +525,24 @@ def help_config():
         f"{Color.PURP.value}Required fields:{Color.WHITE.value}",
         "  • accounts[].id          - Organization slug from banking provider",
         "  • accounts[].secret_key  - API secret key",
-        "  • certificates.qonto     - SHA256 hash of Qonto API DER cert (64 hex chars)",
+        "  • certificates.qonto     - Command that prints the SHA256 hashes of the Qonto API",
+        "                             DER certs to accept (see below)",
         "",
         f"{Color.PURP.value}Optional fields:{Color.WHITE.value}",
-        "  • certificates.aws_s3    - SHA256 hash of AWS S3 DER cert",
+        "  • certificates.aws_s3    - Same, for AWS S3",
         "                             (REQUIRED for download/hash commands)",
         "  • ssl_cafile             - Path to system CA bundle",
         "                             (e.g., /etc/ssl/certs/ca-certificates.crt)",
         "                             Provides defense-in-depth with cert pinning",
+        "",
+        f"{Color.PURP.value}Certificate commands:{Color.WHITE.value}",
+        "  A certificate is not a hash but a command that prints some, as a list: full path, then",
+        "  arguments. The example is tls-pin-get, from https://github.com/c4ffein/crypto",
+        "  • Run as it is (no shell, no ~), when a connection needs it, once per run",
+        "  • Must exit with 0 and print SHA256 hashes, one per line: any of them is accepted",
+        "  • No connection when it fails, prints nothing, or prints anything else",
+        "  • Whoever can edit the config file can run commands as you: keep it 0600",
+        '  • A hash that never changes: ["/bin/echo", "sha256_hash_of_the_der_certificate"]',
         "",
         f"{Color.PURP.value}Cache location:{Color.WHITE.value}",
         "  ~/.local/state/bank/transactions.json",
@@ -502,22 +565,22 @@ class Account:
     Uses certificate pinning for secure API communication.
     """
 
-    def __init__(self, account_dict, cert_checksum, s3_cert_checksum=None, ssl_cafile=None):
+    def __init__(self, account_dict, pin_command, s3_pin_command=None, ssl_cafile=None):
         """
         Initialize an Account instance.
 
         Args:
             account_dict: Dict containing 'id', 'secret_key', and 'local_store_path'
-            cert_checksum: SHA256 hash of the pinned certificate for Qonto API
-            s3_cert_checksum: SHA256 hash of the pinned certificate for AWS S3
+            pin_command: Command (argv tuple) that prints the pinned SHA256s for Qonto API, see resolve_pins
+            s3_pin_command: Same, for AWS S3
             ssl_cafile: Optional path to CA bundle file for additional TLS verification
         """
         self.endpoint = b"thirdparty.qonto.com"
         account_keys = ["id", "secret_key", "local_store_path"]
         self.organization_slug, self.secret_key, self.local_store_path = (account_dict[k] for k in account_keys)
         self.account_infos = None
-        self.cert_checksum = cert_checksum
-        self.s3_cert_checksum = s3_cert_checksum
+        self.pin_command = pin_command
+        self.s3_pin_command = s3_pin_command
         self.ssl_cafile = ssl_cafile
 
     @property
@@ -528,7 +591,7 @@ class Account:
     def get_infos(self):
         """Fetch and store organization information from the API."""
         response_dict = get_body(
-            self.endpoint, b"/v2/organization", self.cert_checksum, authorization=self.auth_str, cafile=self.ssl_cafile
+            self.endpoint, b"/v2/organization", self.pin_command, authorization=self.auth_str, cafile=self.ssl_cafile
         )
         self.account_infos = OrganizationResponse.from_dict(response_dict)
 
@@ -545,7 +608,7 @@ class Account:
         self.get_infos()
         # Convert back to dict for pretty printing (could improve this later)
         response_dict = get_body(
-            self.endpoint, b"/v2/organization", self.cert_checksum, authorization=self.auth_str, cafile=self.ssl_cafile
+            self.endpoint, b"/v2/organization", self.pin_command, authorization=self.auth_str, cafile=self.ssl_cafile
         )
         print(f"{TITLE}\n{'─' * len(TITLE)}{self._subinfos_str(response_dict, 0, None)}")
 
@@ -624,7 +687,7 @@ class Account:
         transaction_id = transaction["id"]
         validate_uuid(transaction_id)
         url = b"/v2/transactions/" + transaction_id.encode() + b"/attachments"
-        pp(get_body(self.endpoint, url, self.cert_checksum, authorization=self.auth_str, cafile=self.ssl_cafile))
+        pp(get_body(self.endpoint, url, self.pin_command, authorization=self.auth_str, cafile=self.ssl_cafile))
 
     def download_attachments(self, partial_id, output_dir=None):
         """
@@ -640,7 +703,7 @@ class Account:
 
         # Get attachments list
         url = b"/v2/transactions/" + transaction_id.encode() + b"/attachments"
-        response = get_body(self.endpoint, url, self.cert_checksum, authorization=self.auth_str, cafile=self.ssl_cafile)
+        response = get_body(self.endpoint, url, self.pin_command, authorization=self.auth_str, cafile=self.ssl_cafile)
 
         attachments = response.get("attachments", [])
         if not attachments:
@@ -664,12 +727,12 @@ class Account:
             print(f"{DIM}[{i}/{len(attachments)}] Downloading: {WHITE}{file_name}{DIM}...")
             try:
                 # Download file from S3 with certificate pinning - required for security
-                if not self.s3_cert_checksum:
+                if not self.s3_pin_command:
                     raise BankException(
                         "S3 certificate pinning not configured. Add 'aws_s3' certificate to config. "
                         "See 'bank help config' for details."
                     )
-                context = make_pinned_ssl_context(self.s3_cert_checksum, cafile=self.ssl_cafile)
+                context = make_pinned_ssl_context(resolve_pins(self.s3_pin_command), cafile=self.ssl_cafile)
                 request = Request(download_url)
                 with urlopen(request, context=context) as response:
                     file_data = response.read()
@@ -710,7 +773,7 @@ class Account:
         validate_uuid(transaction_id)
         # Get attachments list
         url = b"/v2/transactions/" + transaction_id.encode() + b"/attachments"
-        response = get_body(self.endpoint, url, self.cert_checksum, authorization=self.auth_str, cafile=self.ssl_cafile)
+        response = get_body(self.endpoint, url, self.pin_command, authorization=self.auth_str, cafile=self.ssl_cafile)
         attachments = response.get("attachments", [])
         if not attachments:
             print(f"{Color.DIM.value}No attachments found for transaction {transaction_id[-6:]}{Color.WHITE.value}")
@@ -728,12 +791,12 @@ class Account:
                 print()
                 continue
             try:
-                if not self.s3_cert_checksum:
+                if not self.s3_pin_command:
                     raise BankException(
                         "S3 certificate pinning not configured. Add 'aws_s3' certificate to config. "
                         "See 'bank help config' for details."
                     )
-                context = make_pinned_ssl_context(self.s3_cert_checksum, cafile=self.ssl_cafile)
+                context = make_pinned_ssl_context(resolve_pins(self.s3_pin_command), cafile=self.ssl_cafile)
                 request = Request(download_url)
                 with urlopen(request, context=context) as response:
                     file_data = response.read()
@@ -785,7 +848,7 @@ class Account:
                 self.endpoint,
                 b"/v2/transactions/" + transaction_id.encode() + b"/attachments",
                 file,
-                self.cert_checksum,
+                self.pin_command,
                 authorization=self.auth_str,
                 additional_headers={"X-Qonto-Idempotency-Key": idempo},
                 cafile=self.ssl_cafile,
@@ -839,7 +902,7 @@ class Account:
             query_string += b"&"
         url = b"/v2/transactions?" + query_string + b"bank_account_id="
         response_dict = get_body(
-            self.endpoint, url + account_id, self.cert_checksum, authorization=self.auth_str, cafile=self.ssl_cafile
+            self.endpoint, url + account_id, self.pin_command, authorization=self.auth_str, cafile=self.ssl_cafile
         )
         ts = TransactionsResponse.from_dict(response_dict)
         # Save transactions to cache (convert to dicts)
@@ -883,26 +946,11 @@ class Config:
         # Validate certificates
         if "qonto" not in json["certificates"]:
             raise BankException("Missing 'certificates.qonto' field in config")
-        qonto_cert = json["certificates"]["qonto"]
-        if not isinstance(qonto_cert, str):
-            raise BankException(f"Certificate must be a string, got {type(qonto_cert).__name__}")
-        qonto_cert = qonto_cert.lower()
-        if len(qonto_cert) != 64:
-            raise BankException(f"Certificate must be 64 hex characters, got {len(qonto_cert)}")
-        if any(c not in "0123456789abcdef" for c in qonto_cert):
-            raise BankException("Certificate must contain only hexadecimal characters (0-9, a-f)")
-
+        qonto_cert = validate_pin_command(json["certificates"]["qonto"], "Certificate")
         # Optional: AWS S3 certificate for attachment downloads
         s3_cert = json["certificates"].get("aws_s3")
         if s3_cert is not None:
-            if not isinstance(s3_cert, str):
-                raise BankException(f"S3 certificate must be a string, got {type(s3_cert).__name__}")
-            s3_cert = s3_cert.lower()
-            if len(s3_cert) != 64:
-                raise BankException(f"S3 certificate must be 64 hex characters, got {len(s3_cert)}")
-            if any(c not in "0123456789abcdef" for c in s3_cert):
-                raise BankException("S3 certificate must contain only hexadecimal characters (0-9, a-f)")
-
+            s3_cert = validate_pin_command(s3_cert, "S3 certificate")
         self.certificates = {"qonto": qonto_cert, "aws_s3": s3_cert}
         # Optional: system CA bundle path for better TLS validation (in addition to cert pinning)
         self.ssl_cafile = json.get("ssl_cafile")
@@ -918,7 +966,7 @@ class Config:
                     raise BankException(f"Missing '{field}' in account #{i + 1}")
         self.accounts = [
             Account(
-                a, self.certificates["qonto"], s3_cert_checksum=self.certificates["aws_s3"], ssl_cafile=self.ssl_cafile
+                a, self.certificates["qonto"], s3_pin_command=self.certificates["aws_s3"], ssl_cafile=self.ssl_cafile
             )
             for a in json["accounts"]
         ]
@@ -937,6 +985,8 @@ def main():
     try:
         with (Path.home() / ".config" / "bank" / "config.json").open() as f:
             config = Config(f.read())
+    except BankException:
+        raise  # There is a config file, and it is not what we expect: say what is wrong with it
     except Exception:
         return usage(wrong_config=True)
     if len(argv) < 2 or argv[1] == "accounts":

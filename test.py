@@ -4,7 +4,7 @@ from unittest import TestCase
 from unittest import main as unittest_main
 from unittest.mock import patch
 
-from bank import Account, BankException, Config, parse_date_params
+from bank import Account, BankException, Config, make_pinned_ssl_context, parse_date_params, resolve_pins
 
 
 def mock_get_body_for_tests(addr: bytes, url: bytes, *args, **kwargs) -> dict:
@@ -49,7 +49,7 @@ class ConfigValidationTest(TestCase):
     def test_missing_accounts_field(self):
         """Should raise error when accounts field is missing"""
         with self.assertRaises(BankException) as ctx:
-            Config('{"certificates": {"qonto": "abc123"}}')
+            Config('{"certificates": {"qonto": ["cmd"]}}')
         self.assertEqual(str(ctx.exception), "Missing 'accounts' field in config")
 
     def test_missing_qonto_certificate(self):
@@ -59,71 +59,46 @@ class ConfigValidationTest(TestCase):
         self.assertEqual(str(ctx.exception), "Missing 'certificates.qonto' field in config")
 
     def test_certificate_wrong_type(self):
-        """Should raise error when certificate is not a string"""
-        with self.assertRaises(BankException) as ctx:
-            Config('{"certificates": {"qonto": 123}, "accounts": []}')
-        self.assertEqual(str(ctx.exception), "Certificate must be a string, got int")
-
-    def test_certificate_invalid_length(self):
-        """Should raise error when certificate is not 64 characters"""
-        config_str = (
-            '{"certificates": {"qonto": "abc"}, "accounts": [{"id": "x", "secret_key": "y", "local_store_path": "z"}]}'
-        )
-        with self.assertRaises(BankException) as ctx:
-            Config(config_str)
-        self.assertEqual(str(ctx.exception), "Certificate must be 64 hex characters, got 3")
-
-    def test_certificate_invalid_characters(self):
-        """Should raise error when certificate contains non-hex characters"""
-        with self.assertRaises(BankException) as ctx:
-            Config(
-                '{"certificates": {"qonto": "'
-                + "G" * 64
-                + '"}, "accounts": [{"id": "x", "secret_key": "y", "local_store_path": "z"}]}'
-            )
-        self.assertEqual(str(ctx.exception), "Certificate must contain only hexadecimal characters (0-9, a-f)")
+        """Should raise error when certificate is not a command: a hash, as it used to be, included"""
+        for value, name in (("123", "int"), ('"' + "a" * 64 + '"', "str"), ('{"command": ["cmd"]}', "dict")):
+            with self.subTest(value=value), self.assertRaises(BankException) as ctx:
+                Config('{"certificates": {"qonto": ' + value + '}, "accounts": []}')
+            self.assertEqual(str(ctx.exception), f"Certificate must be a command (list of strings), got {name}")
 
     def test_accounts_wrong_type(self):
         """Should raise error when accounts is not a list"""
         with self.assertRaises(BankException) as ctx:
-            Config('{"certificates": {"qonto": "' + "a" * 64 + '"}, "accounts": "not-a-list"}')
+            Config('{"certificates": {"qonto": ["cmd"]}, "accounts": "not-a-list"}')
         self.assertEqual(str(ctx.exception), "'accounts' must be a list, got str")
 
     def test_accounts_empty_list(self):
         """Should raise error when accounts list is empty"""
         with self.assertRaises(BankException) as ctx:
-            Config('{"certificates": {"qonto": "' + "a" * 64 + '"}, "accounts": []}')
+            Config('{"certificates": {"qonto": ["cmd"]}, "accounts": []}')
         self.assertEqual(str(ctx.exception), "'accounts' list cannot be empty")
 
     def test_account_missing_id(self):
         """Should raise error when account is missing id field"""
         with self.assertRaises(BankException) as ctx:
-            Config(
-                '{"certificates": {"qonto": "'
-                + "a" * 64
-                + '"}, "accounts": [{"secret_key": "y", "local_store_path": "z"}]}'
-            )
+            Config('{"certificates": {"qonto": ["cmd"]}, "accounts": [{"secret_key": "y", "local_store_path": "z"}]}')
         self.assertEqual(str(ctx.exception), "Missing 'id' in account #1")
 
     def test_account_missing_secret_key(self):
         """Should raise error when account is missing secret_key field"""
         with self.assertRaises(BankException) as ctx:
-            Config(
-                '{"certificates": {"qonto": "' + "a" * 64 + '"}, "accounts": [{"id": "x", "local_store_path": "z"}]}'
-            )
+            Config('{"certificates": {"qonto": ["cmd"]}, "accounts": [{"id": "x", "local_store_path": "z"}]}')
         self.assertEqual(str(ctx.exception), "Missing 'secret_key' in account #1")
 
     def test_account_missing_local_store_path(self):
         """Should raise error when account is missing local_store_path field"""
         with self.assertRaises(BankException) as ctx:
-            Config('{"certificates": {"qonto": "' + "a" * 64 + '"}, "accounts": [{"id": "x", "secret_key": "y"}]}')
+            Config('{"certificates": {"qonto": ["cmd"]}, "accounts": [{"id": "x", "secret_key": "y"}]}')
         self.assertEqual(str(ctx.exception), "Missing 'local_store_path' in account #1")
 
     def test_multiple_accounts_not_supported(self):
         """Should raise error when multiple accounts are configured"""
-        cert = "a" * 64
         config_str = (
-            f'{{"certificates": {{"qonto": "{cert}"}}, '
+            '{"certificates": {"qonto": ["cmd"]}, '
             '"accounts": ['
             '{"id": "x", "secret_key": "y", "local_store_path": "z"}, '
             '{"id": "x2", "secret_key": "y2", "local_store_path": "z2"}'
@@ -132,6 +107,125 @@ class ConfigValidationTest(TestCase):
         with self.assertRaises(BankException) as ctx:
             Config(config_str)
         self.assertEqual(str(ctx.exception), "Only single account supported, found 2 in config")
+
+
+class PinCommandTest(TestCase):
+    """A certificate is configured as a command that prints the SHA256 pins to accept"""
+
+    ACCOUNTS = '"accounts": [{"id": "x", "secret_key": "y", "local_store_path": "z"}]'
+
+    @staticmethod
+    def sh(script):
+        return ("/bin/sh", "-c", script)
+
+    def test_config_accepts_commands(self):
+        """Commands are kept as they are, and not run when the config is loaded"""
+        config = Config(
+            '{"certificates": {"qonto": ["/nonexistent/tls-pin-get", "thirdparty.qonto.com:443"], '
+            '"aws_s3": ["/nonexistent/tls-pin-get", "qonto.s3.eu-central-1.amazonaws.com:443"]}, ' + self.ACCOUNTS + "}"
+        )
+        self.assertEqual(config.certificates["qonto"], ("/nonexistent/tls-pin-get", "thirdparty.qonto.com:443"))
+        self.assertEqual(config.accounts[0].pin_command, ("/nonexistent/tls-pin-get", "thirdparty.qonto.com:443"))
+        self.assertEqual(
+            config.accounts[0].s3_pin_command, ("/nonexistent/tls-pin-get", "qonto.s3.eu-central-1.amazonaws.com:443")
+        )
+
+    def test_config_rejects_bad_commands(self):
+        for command in ("[]", '[""]', '["cmd", 1]', '["cmd", ["nested"]]', '["cmd", "a\\u0000b"]'):
+            with self.subTest(command=command), self.assertRaises(BankException) as ctx:
+                Config('{"certificates": {"qonto": ' + command + "}, " + self.ACCOUNTS + "}")
+            self.assertEqual(str(ctx.exception), "Certificate command must be a non-empty list of non-empty strings")
+        with self.assertRaises(BankException) as ctx:
+            Config('{"certificates": {"qonto": ["cmd"], "aws_s3": []}, ' + self.ACCOUNTS + "}")
+        self.assertEqual(str(ctx.exception), "S3 certificate command must be a non-empty list of non-empty strings")
+
+    def test_static_pin(self):
+        """A hash that never changes is still possible: echo"""
+        self.assertEqual(resolve_pins(("/bin/echo", "a" * 64)), ("a" * 64,))
+
+    def test_command_one_pin(self):
+        self.assertEqual(resolve_pins(self.sh(f"echo {'a' * 64}")), ("a" * 64,))
+
+    def test_command_several_pins(self):
+        """All of them are accepted: the old and the new certificate overlap during a rotation"""
+        pins = resolve_pins(self.sh(f"printf '%s\\n' {'a' * 64} {'B' * 64}"))
+        self.assertEqual(pins, ("a" * 64, "b" * 64))
+
+    def test_command_receives_arguments_without_a_shell(self):
+        with patch("bank.subprocess.run") as mock_run:
+            mock_run.return_value = subprocess.CompletedProcess([], 0, stdout=b"c" * 64 + b"\n", stderr=b"")
+            self.assertEqual(resolve_pins(("tls-pin-get", "host; rm -rf $HOME")), ("c" * 64,))
+        self.assertEqual(mock_run.call_args.args, (("tls-pin-get", "host; rm -rf $HOME"),))
+        self.assertNotIn("shell", mock_run.call_args.kwargs)
+
+    def test_command_is_run_once(self):
+        with patch("bank.subprocess.run") as mock_run:
+            mock_run.return_value = subprocess.CompletedProcess([], 0, stdout=b"d" * 64 + b"\n", stderr=b"")
+            resolve_pins(("tls-pin-get", "run-once.example:443"))
+            resolve_pins(("tls-pin-get", "run-once.example:443"))
+        self.assertEqual(mock_run.call_count, 1)
+
+    def test_command_failures(self):
+        cases = {
+            "exit 1": "Pin command failed (exit code 1): /bin/sh -c exit 1",
+            "echo 'no pin for x' >&2; exit 1": (
+                "Pin command failed (exit code 1): /bin/sh -c echo 'no pin for x' >&2; exit 1: no pin for x"
+            ),
+            f"echo {'a' * 64}; exit 3": f"Pin command failed (exit code 3): /bin/sh -c echo {'a' * 64}; exit 3",
+            "true": "Pin command printed no pin: /bin/sh -c true",
+            "echo": "Pin command printed no pin: /bin/sh -c echo",
+        }
+        for script, message in cases.items():
+            with self.subTest(script=script), self.assertRaises(BankException) as ctx:
+                resolve_pins(self.sh(script))
+            self.assertEqual(str(ctx.exception), message)
+
+    def test_command_output_that_is_not_pins(self):
+        """One bad line and nothing is accepted, the valid lines included"""
+        scripts = (
+            f"echo {'a' * 63}",
+            f"echo {'a' * 65}",
+            f"echo {'g' * 64}",
+            f"echo ' {'a' * 64}'",
+            f"echo {'a' * 64}; echo",
+            f"echo {'a' * 64}; echo not-a-pin",
+            f"printf '{'a' * 64}\\r\\n'",
+            f"printf '{'a' * 63}\\351\\n'",
+        )
+        for script in scripts:
+            with self.subTest(script=script), self.assertRaises(BankException) as ctx:
+                resolve_pins(self.sh(script))
+            self.assertIn("Pin command printed something that is not a SHA256", str(ctx.exception))
+
+    def test_command_too_many_pins(self):
+        with self.assertRaises(BankException) as ctx:
+            resolve_pins(self.sh(f"for i in $(seq 17); do echo {'a' * 64}; done"))
+        self.assertIn("Pin command printed more than 16 pins", str(ctx.exception))
+
+    def test_command_not_found(self):
+        with self.assertRaises(BankException) as ctx:
+            resolve_pins(("/nonexistent/tls-pin-get", "thirdparty.qonto.com:443"))
+        self.assertIn(
+            "Pin command could not be run: /nonexistent/tls-pin-get thirdparty.qonto.com:443", str(ctx.exception)
+        )
+
+    def test_command_timeout(self):
+        with patch("bank.subprocess.run", side_effect=subprocess.TimeoutExpired("cmd", 10)):
+            with self.assertRaises(BankException) as ctx:
+                resolve_pins(("tls-pin-get", "timeout.example:443"))
+        self.assertEqual(str(ctx.exception), "Pin command timed out after 10s: tls-pin-get timeout.example:443")
+
+    def test_failing_command_means_no_connection(self):
+        account = Account({"id": "x", "secret_key": "y", "local_store_path": "z"}, self.sh("exit 1"))
+        with patch("bank.urlopen") as mock_urlopen, self.assertRaises(BankException):
+            account.get_infos()
+        mock_urlopen.assert_not_called()
+
+    def test_pinned_context_accepts_one_or_several_pins(self):
+        for pins in ("a" * 64, ("a" * 64, "b" * 64), []):
+            with self.subTest(pins=pins):
+                context = make_pinned_ssl_context(pins)
+                self.assertTrue(context.check_hostname)
 
 
 class DateParsingTest(TestCase):
@@ -245,7 +339,7 @@ class DateParameterIntegrationTest(TestCase):
             "secret_key": "test-secret-key",
             "local_store_path": "/tmp/test-cache",
         }
-        self.account = Account(account_dict, "a" * 64, ssl_cafile=None)
+        self.account = Account(account_dict, ("/bin/echo", "a" * 64), ssl_cafile=None)
 
     @patch("builtins.print")
     @patch("bank.get_body")
@@ -322,7 +416,7 @@ class CombinedParametersTest(TestCase):
             "secret_key": "test-secret-key",
             "local_store_path": "/tmp/test-cache",
         }
-        self.account = Account(account_dict, "a" * 64, ssl_cafile=None)
+        self.account = Account(account_dict, ("/bin/echo", "a" * 64), ssl_cafile=None)
 
     @patch("builtins.print")
     @patch("bank.get_body")
@@ -371,7 +465,7 @@ class InvoiceParameterTest(TestCase):
             "secret_key": "test-secret-key",
             "local_store_path": "/tmp/test-cache",
         }
-        self.account = Account(account_dict, "a" * 64, ssl_cafile=None)
+        self.account = Account(account_dict, ("/bin/echo", "a" * 64), ssl_cafile=None)
 
     @patch("builtins.print")
     @patch("bank.get_body")
