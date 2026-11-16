@@ -20,8 +20,14 @@ bank - KISS banking client
   + date>=2024                      ==> transactions from 2024 onwards
   + date<2024                       ==> transactions before 2024
   + date>=2023 date<2025            ==> transactions in range
-- bank j        end_of_id file_path ==> add a file to a transaction by the end of its id
-- bank justify  end_of_id file_path ==> add a file to a transaction by the end of its id
+- bank j        end_of_id file_path ==> send a pdf/jpg/png to a transaction by the end of its id, and link it
+- bank justify  end_of_id file_path ==> send a pdf/jpg/png to a transaction by the end of its id, and link it
+  + force                           ==> send it again, when it was already sent to this transaction
+- bank link     end_of_id file_path ==> link a local file to a transaction, without sending it
+- bank unlinked path [path ...]     ==> list the local files that are not linked to any transaction
+- bank reconcile path [path ...]    ==> compare the attachments on Qonto with local files: link what matches,
+                                        list what is on Qonto only, and the local files that are not linked
+  + date=2024 ...                   ==> only the transactions of these dates, as for transactions
 - bank d        end_of_id [out_dir] ==> download attachments for a transaction
 - bank download end_of_id [out_dir] ==> download attachments for a transaction
 - bank hash     end_of_id           ==> show SHA256 hashes of attachments
