@@ -150,6 +150,15 @@ class BankException(Exception):
     pass
 
 
+def printable(value) -> str:
+    """
+    What can be printed of a string that is not ours (a file name, what the API answers): a "?" replaces whatever
+    is not printable. A terminal obeys the escape sequences that it is given, a new line makes a line of its own,
+    and a file name that is not UTF-8 could not be printed at all.
+    """
+    return "".join(c if c.isprintable() else "?" for c in str(value))
+
+
 def detect_file_type(data: bytes) -> tuple[str, str]:
     """
     (extension, mimetype) of a file that Qonto accepts as an attachment, from its first bytes: its name is not trusted.
@@ -336,7 +345,7 @@ def print_unlinked(paths: list[str]) -> int:
         total += 1
         if digest not in linked:
             unlinked += 1
-            print(path)
+            print(printable(path))
     color = Color.RED.value if unlinked else Color.GREEN.value
     print(f"{color}{total} file(s), {total - unlinked} linked, {unlinked} not linked{Color.WHITE.value}")
     return 1 if unlinked else 0
@@ -370,8 +379,7 @@ def resolve_pins(command):
     except (OSError, ValueError) as e:
         raise BankException(f"Pin command could not be run: {shown}: {e}") from e
     if result.returncode != 0:
-        detail = " ".join(result.stderr.decode(errors="replace").split())[:200]
-        detail = "".join(c if c.isprintable() else "?" for c in detail)
+        detail = printable(" ".join(result.stderr.decode(errors="replace").split())[:200])
         raise BankException(f"Pin command failed (exit code {result.returncode}): {shown}{detail and ': ' + detail}")
     try:
         pins = tuple(line.lower() for line in result.stdout.decode("ascii").removesuffix("\n").split("\n"))
@@ -610,7 +618,7 @@ def describe_http_error(error: HTTPError) -> str:
         detail = "; ".join(": ".join(str(e[k]) for k in ("code", "detail") if e.get(k)) for e in loads(raw)["errors"])
     except (ValueError, KeyError, TypeError, AttributeError):
         detail = raw.decode(errors="replace")  # Anything else (S3 answers in XML) is shown as it is
-    detail = "".join(c if c.isprintable() else "?" for c in " ".join(detail.split()))[:300]
+    detail = printable(" ".join(detail.split()))[:300]
     return f"HTTP {error.code} {error.reason}" + (f": {detail}" if detail else "")
 
 
@@ -870,10 +878,10 @@ class Account:
         starter = " " * level * 2
         starter += Color.GREEN.value if level == 0 else Color.PURP.value if level % 2 else Color.RED.value
         if isinstance(infos, dict):
-            return "".join(f"\n{starter}{k}{self._subinfos_str(v, level + 1, k)}" for k, v in infos.items())
+            return "".join(f"\n{starter}{printable(k)}{self._subinfos_str(v, level + 1, k)}" for k, v in infos.items())
         if isinstance(infos, list):
             return "".join(f"\n{starter}#{i}{self._subinfos_str(v, level + 1, i)}" for i, v in enumerate(infos))
-        return f" {Color.DIM.value}{'─' * (34 - level * 2 - len(str(last_key)))}{Color.WHITE.value} {infos}"
+        return f" {Color.DIM.value}{'─' * (34 - level * 2 - len(str(last_key)))}{Color.WHITE.value} {printable(infos)}"
 
     def print_infos(self):
         self.get_infos()
@@ -985,7 +993,8 @@ class Account:
                 failed += 1
                 print(f"{RED}✗ [{i}/{total}] Failed to download {file_name}: {e}{WHITE}")
                 continue
-            print(f"{GREEN}✓ {DIM}[{i}/{total}] {WHITE}{output_path} {DIM}({len(content) / 1024:.1f} KB){WHITE}")
+            size = f"({len(content) / 1024:.1f} KB)"
+            print(f"{GREEN}✓ {DIM}[{i}/{total}] {WHITE}{printable(output_path)} {DIM}{size}{WHITE}")
         if total:
             print(f"{RED if failed else GREEN}Downloaded {total - failed} of {total} attachment(s){WHITE}")
         return 1 if failed else 0
@@ -1079,9 +1088,9 @@ class Account:
         digest = sha256(file).hexdigest()
         added = add_link(transaction["transaction_id"], path, digest)
         DIM, WHITE = Color.DIM.value, Color.WHITE.value
-        print(f"{DIM}Transaction: {WHITE}{transaction['transaction_id']}")
+        print(f"{DIM}Transaction: {WHITE}{printable(transaction['transaction_id'])}")
         print(f"{DIM}SHA256: {WHITE}{digest}")
-        print(f"{Color.GREEN.value}✓ {'Linked' if added else 'Was already linked'}: {WHITE}{path}")
+        print(f"{Color.GREEN.value}✓ {'Linked' if added else 'Was already linked'}: {WHITE}{printable(path)}")
 
     def justify(self, partial_id, file_path, force=False):
         """
@@ -1185,7 +1194,7 @@ class Account:
         on_qonto = set()  # (transaction_id, sha256) of every attachment
         new_links = remote_only = failed = 0
         for t in transactions:
-            short = f"{Color.PURP.value}{t.transaction_id[-6:]}{WHITE} {t.label}"
+            short = f"{Color.PURP.value}{printable(t.transaction_id[-6:])}{WHITE} {printable(t.label)}"
             attachment_ids = t.attachment_ids
             if not attachment_ids or any(attachment_id not in known for attachment_id in attachment_ids):
                 attachment_ids = []
@@ -1200,7 +1209,8 @@ class Account:
                             )
                     except BankException as e:
                         failed += 1
-                        print(f"{RED}✗ could not download {WHITE}{short}{DIM} attachment {attachment_id}: {e}{WHITE}")
+                        shown_id = printable(attachment_id)
+                        print(f"{RED}✗ could not download {WHITE}{short}{DIM} attachment {shown_id}: {e}{WHITE}")
                         continue
                     attachment_ids.append(attachment_id)
             for attachment_id in attachment_ids:
@@ -1208,12 +1218,12 @@ class Account:
                 on_qonto.add((t.transaction_id, digest))
                 if digest not in local:
                     remote_only += 1
-                    print(f"{RED}✗ on Qonto only    {WHITE}{short}{DIM} attachment {attachment_id}{WHITE}")
+                    print(f"{RED}✗ on Qonto only    {WHITE}{short}{DIM} attachment {printable(attachment_id)}{WHITE}")
                 elif (t.transaction_id, digest) not in linked:
                     add_link(t.transaction_id, local[digest], digest)
                     linked.add((t.transaction_id, digest))
                     new_links += 1
-                    print(f"{GREEN}✓ linked           {WHITE}{short}{DIM} {local[digest]}{WHITE}")
+                    print(f"{GREEN}✓ linked           {WHITE}{short}{DIM} {printable(local[digest])}{WHITE}")
         # The other way: local files, against the links
         fetched = {t.transaction_id: t for t in transactions}
         linked_hashes = {digest for _, digest in linked}
@@ -1230,17 +1240,17 @@ class Account:
             t = fetched.get(transaction_id) or without_attachments.get(transaction_id)
             if t is None:  # Not a transaction of these dates
                 continue
-            short = f"{Color.PURP.value}{t.transaction_id[-6:]}{WHITE} {t.label}"
+            short = f"{Color.PURP.value}{printable(t.transaction_id[-6:])}{WHITE} {printable(t.label)}"
             if (t.id, digest) in sent:  # It was there: someone removed it
                 gone += 1
-                print(f"{RED}✗ gone from Qonto  {WHITE}{short}{DIM} {local[digest]}{WHITE}")
+                print(f"{RED}✗ gone from Qonto  {WHITE}{short}{DIM} {printable(local[digest])}{WHITE}")
             elif transaction_id in fetched:  # Linked without being sent (bank link): not an error
                 local_only += 1
-                print(f"{DIM}· linked here only {WHITE}{short}{DIM} {local[digest]}{WHITE}")
+                print(f"{DIM}· linked here only {WHITE}{short}{DIM} {printable(local[digest])}{WHITE}")
         for path, digest in local_hashes:
             if digest not in linked_hashes:
                 unlinked += 1
-                print(f"{RED}✗ not linked       {WHITE}{path}")
+                print(f"{RED}✗ not linked       {WHITE}{printable(path)}")
         problems = remote_only + unlinked + failed + gone
         print(
             f"{RED if problems else GREEN}"
@@ -1305,8 +1315,8 @@ class Account:
         """
         transactions, meta = self.fetch_transactions(attachments=attachments, date_filter=date_filter)
         for t in transactions:
-            short_transaction_id = f" {t.transaction_id[-6:]} "
-            label = f"{Color.WHITE.value} {t.label}{Color.DIM.value} "
+            short_transaction_id = f" {printable(t.transaction_id[-6:])} "
+            label = f"{Color.WHITE.value} {printable(t.label)}{Color.DIM.value} "
             # Choose which currency to display
             if use_original_currency and t.local_currency and t.local_currency != t.currency:
                 money = t.local_amount_cents
@@ -1318,7 +1328,7 @@ class Account:
             sign = "-" if t.side == "debit" else "+"
             symbol = currency_symbol(currency_code)
             money_str += f" {sign}{money // 100},{str(money % 100).zfill(2)} {symbol} "
-            emitted_at = f" {t.emitted_at[:10]}"
+            emitted_at = f" {printable(t.emitted_at[:10])}"
             print(
                 f"{Color.DIM.value}─"
                 f"{Color.PURP.value}{short_transaction_id}"
@@ -1328,7 +1338,10 @@ class Account:
                 f"{Color.DIM.value}─"
                 f"{Color.PURP.value}{emitted_at}"
             )
-        meta_gen = (f"{Color.PURP.value}{k}{Color.DIM.value}={Color.WHITE.value}{v}" for k, v in meta.items())
+        meta_gen = (
+            f"{Color.PURP.value}{printable(k)}{Color.DIM.value}={Color.WHITE.value}{printable(v)}"
+            for k, v in meta.items()
+        )
         print("", f"{Color.DIM.value} ─ ".join(meta_gen))
 
 
@@ -1464,5 +1477,5 @@ if __name__ == "__main__":
     try:
         exit(main() or 0)
     except BankException as e:
-        print(f"{Color.RED.value}\n  !!  {e}  !!  {Color.WHITE.value}\n")
+        print(f"{Color.RED.value}\n  !!  {printable(e)}  !!  {Color.WHITE.value}\n")
         exit(-1)

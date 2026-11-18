@@ -27,6 +27,7 @@ from bank import (
     make_pinned_ssl_context,
     parse_date_params,
     print_unlinked,
+    printable,
     read_json,
     resolve_pins,
     state_lock,
@@ -704,6 +705,12 @@ for i in range(20):
 class PaginationTest(StateTestCase):
     PAGES = {1: [1, 2], 2: [3, 4], 3: [5]}
 
+    @staticmethod
+    def without_colors(text):
+        for color in ("\033[31m", "\033[32m", "\033[34m", "\033[90m", "\033[39m"):
+            text = text.replace(color, "")
+        return text
+
     def get_body(self, addr, url, *args, **kwargs):
         if url == b"/v2/organization":
             return mock_get_body_for_tests(addr, url)
@@ -727,6 +734,43 @@ class PaginationTest(StateTestCase):
             self.assertIn(f"label {n}", line)
         self.assertEqual(len(self.account.get_transaction_cache()), 5)
         self.assertEqual(self.account.get_one_transaction("transaction-5")["label"], "label 5")
+
+    @patch("builtins.print")
+    @patch("bank.get_body")
+    def test_what_the_api_answers_is_printed_without_what_a_terminal_would_obey(self, mock_get_body, mock_print):
+        hostile = {"label": "shop\x1b[2J\r", "transaction_id": "x-\x1b[1A\n1", "emitted_at": "2024\x1b[2K\x07-01"}
+        mock_get_body.side_effect = lambda addr, url, *args, **kwargs: (
+            mock_get_body_for_tests(addr, url)
+            if url == b"/v2/organization"
+            else {
+                "transactions": [transaction(1, **hostile)],
+                "meta": {"next_page": None, "to\x1b[2Jtal": "5\x1b[1A\n"},
+            }
+        )
+        self.account.print_transactions()
+        line, meta = (self.without_colors(call[0][1 if call[0][0] == "" else 0]) for call in mock_print.call_args_list)
+        self.assertTrue(line.isprintable(), repr(line))
+        self.assertEqual(meta, "next_page=None ─ to?[2Jtal=5?[1A?")
+        for shown in ("shop?[2J?", " ?[1A?1 ", " 2024?[2K?-"):
+            self.assertIn(shown, line)
+        self.assertEqual(self.account.get_one_transaction("x-\x1b[1A\n1")["label"], hostile["label"])  # Cached as it is
+
+    @patch("builtins.print")
+    @patch("bank.get_body")
+    def test_accounts_are_printed_without_what_a_terminal_would_obey(self, mock_get_body, mock_print):
+        mock_get_body.return_value = {
+            "organization": {
+                "legal\x1b[2J_name": "shop\x1b]0;pwned\x07\n",
+                "bank_accounts": [{"id": "12345678-1234-1234-1234-123456789abc", "name": "main\r\x1b[1A"}],
+            }
+        }
+        self.account.print_infos()
+        lines = self.without_colors(mock_print.call_args[0][0]).split("\n")
+        self.assertEqual(len(lines), 8, lines)  # Title, rule, then one line per key or index: none that a value made
+        self.assertTrue(all(line.isprintable() for line in lines), lines)
+        self.assertIn("legal?[2J_name", lines[3])
+        self.assertTrue(lines[3].endswith(" shop?]0;pwned??"))
+        self.assertTrue(lines[7].endswith(" main??[1A"))
 
     @patch("builtins.print")
     @patch("bank.get_body")
@@ -766,6 +810,27 @@ class PaginationTest(StateTestCase):
             with self.subTest(next_page=next_page), self.assertRaises(BankException) as ctx:
                 self.account.fetch_transactions()
             self.assertEqual(str(ctx.exception), f"Unexpected next page after page 1: {next_page}")
+
+
+class PrintableTest(TestCase):
+    def test_what_is_printable_is_left_as_it_is(self):
+        for text in ("", "/home/you/Factures 2024/café – hôtel (1).pdf", "日本語 ✓ ─ €"):
+            self.assertEqual(printable(text), text)
+        self.assertEqual(printable(Path("/a/b.pdf")), "/a/b.pdf")
+        self.assertEqual(printable(BankException("said")), "said")
+
+    def test_what_is_not_printable_is_a_question_mark(self):
+        cases = {
+            "a\x1b[2Kb": "a?[2Kb",
+            "a\nb\rc\td": "a?b?c?d",
+            "a\x00b\x07c\x7fd\x9be": "a?b?c?d?e",  # 0x9b: the CSI of the C1 controls, an escape by itself
+            "a\u202eb\u2028c": "a?b?c",  # Right-to-left override, line separator
+            os.fsdecode(b"a\xff\xfeb"): "a??b",
+        }
+        for text, shown in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(printable(text), shown)
+                printable(text).encode()
 
 
 class FileTypeTest(TestCase):
@@ -954,7 +1019,7 @@ class LinksTest(StateTestCase):
         """(exit code, paths that were printed) of bank unlinked"""
         mock_print.reset_mock()
         code = print_unlinked([str(path) for path in paths])
-        return code, [call[0][0] for call in mock_print.call_args_list[:-1]]
+        return code, [Path(call[0][0]) for call in mock_print.call_args_list[:-1]]
 
     def test_link_writes_the_expected_file(self, mock_print):
         train, hotel = self.write_file("train.pdf", PDF), self.write_file("hotel.heic", b"not sent, so any type")
@@ -998,6 +1063,25 @@ class LinksTest(StateTestCase):
         self.assertEqual(self.unlinked(mock_print, moved), (0, []))
         moved.write_bytes(PDF + b"edited")
         self.assertEqual(self.unlinked(mock_print, moved), (1, [moved]))
+
+    def test_file_names_are_printed_without_what_a_terminal_would_obey(self, mock_print):
+        names = {
+            "title\x1b]0;pwned\x07\x1b[2K.pdf": "title?]0;pwned??[2K.pdf",  # Escape sequences
+            "line\n0 file(s), 0 linked, 0 not linked.pdf": "line?0 file(s), 0 linked, 0 not linked.pdf",
+            os.fsdecode(b"latin1-\xe9.pdf"): "latin1-?.pdf",  # Not UTF-8: print would raise on it
+        }
+        paths = [self.write_file(name, PDF + name.encode(errors="surrogateescape")) for name in names]
+        documents = self.home / "documents"
+        code, printed = self.unlinked(mock_print, documents)
+        self.assertEqual((code, sorted(printed)), (1, sorted(documents / shown for shown in names.values())))
+        for path, shown in zip(paths, names.values(), strict=True):
+            mock_print.reset_mock()
+            self.account.link("transaction-1", str(path))
+            self.assertTrue(mock_print.call_args[0][0].endswith(str(documents / shown)))
+            for call in mock_print.call_args_list:
+                call[0][0].encode()  # What print does: raises on a name that is not UTF-8
+        self.assertEqual({link["full_path"] for link in get_links()}, set(map(str, paths)))  # Stored as it is
+        self.assertEqual(self.unlinked(mock_print, documents), (0, []))
 
     def test_unlinked_path_that_does_not_exist(self, mock_print):
         with self.assertRaises(BankException) as ctx:
@@ -1168,6 +1252,33 @@ class ReconcileTest(StateTestCase):
 
     def links(self):
         return {(link["transaction_id"][-1], Path(link["full_path"]).name) for link in get_links()}
+
+    def test_what_is_not_ours_is_printed_without_what_a_terminal_would_obey(self, mock_print):
+        self.qonto = {1: {"att-train": PDF}, 2: {"att\x1b[2K-hotel": PNG}}
+        train = self.write_file("train\x1b[1A\n.pdf", PDF)
+        self.write_file(os.fsdecode(b"meal-\xe9.jpg"), JPG)
+        get_body = self.get_body
+
+        def with_labels(addr, url, *args, **kwargs):
+            body = get_body(addr, url, *args, **kwargs)
+            for t in body.get("transactions", []):
+                t["label"] = "shop\x1b]0;pwned\x07\r"
+            return body
+
+        self.get_body = with_labels
+        code, printed, _, _ = self.reconcile(mock_print)
+        self.assertEqual(code, 1)
+        self.assertEqual(
+            printed,
+            [
+                f"✓ linked           tion-1 shop?]0;pwned?? {self.documents / 'train?[1A?.pdf'}",
+                "✗ on Qonto only    tion-2 shop?]0;pwned?? attachment att?[2K-hotel",
+                f"✗ not linked       {self.documents / 'meal-?.jpg'}",
+                "2 attachment(s) on Qonto: 1 newly linked, 1 on Qonto only"
+                " ─ 2 local file(s): 1 not linked, 0 linked here only",
+            ],
+        )
+        self.assertEqual([link["full_path"] for link in get_links()], [str(train)])  # Stored as it is
 
     def test_attachments_that_are_local_files_get_linked(self, mock_print):
         train, hotel = self.write_file("train.pdf", PDF), self.write_file("trip/hotel.png", PNG)
@@ -1396,6 +1507,19 @@ class CommandLineTest(StateTestCase):
         code, output = self.run_bank("show", "abc")
         self.assertEqual(code, 255)
         self.assertIn("No transaction found", output)
+
+    def test_file_name_that_is_not_utf8_is_not_a_crash(self):
+        self.write_file(os.fsdecode(b"latin1-\xe9.pdf"), PDF)
+        self.write_file("line\nbreak.pdf", JPG)
+        documents = self.home / "documents"
+        with patch.dict(os.environ, {"PYTHONIOENCODING": "utf-8:strict"}):  # As with a UTF-8 locale that is not C
+            code, output = self.run_bank("unlinked", str(documents))
+            self.assertEqual(
+                (code, output.splitlines()[:2]), (1, [f"{documents}/latin1-?.pdf", f"{documents}/line?break.pdf"])
+            )
+            code, output = self.run_bank("unlinked", str(documents / os.fsdecode(b"nowhere-\xe9")))
+            self.assertEqual(code, 255)
+            self.assertIn(f"Not a file or a directory: {documents}/nowhere-?  !!", output)
 
     def test_unlinked_is_local(self):
         receipt = self.write_file("receipt.jpg", JPG)
