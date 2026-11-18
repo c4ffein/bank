@@ -750,8 +750,8 @@ class PaginationTest(StateTestCase):
         self.account.print_transactions()
         line, meta = (self.without_colors(call[0][1 if call[0][0] == "" else 0]) for call in mock_print.call_args_list)
         self.assertTrue(line.isprintable(), repr(line))
-        self.assertEqual(meta, "next_page=None ─ to?[2Jtal=5?[1A?")
-        for shown in ("shop?[2J?", " ?[1A?1 ", " 2024?[2K?-"):
+        self.assertEqual(meta, "next_page=None ─ to�[2Jtal=5�[1A�")
+        for shown in ("shop�[2J�", " �[1A�1 ", " 2024�[2K�-"):
             self.assertIn(shown, line)
         self.assertEqual(self.account.get_one_transaction("x-\x1b[1A\n1")["label"], hostile["label"])  # Cached as it is
 
@@ -768,9 +768,9 @@ class PaginationTest(StateTestCase):
         lines = self.without_colors(mock_print.call_args[0][0]).split("\n")
         self.assertEqual(len(lines), 8, lines)  # Title, rule, then one line per key or index: none that a value made
         self.assertTrue(all(line.isprintable() for line in lines), lines)
-        self.assertIn("legal?[2J_name", lines[3])
-        self.assertTrue(lines[3].endswith(" shop?]0;pwned??"))
-        self.assertTrue(lines[7].endswith(" main??[1A"))
+        self.assertIn("legal�[2J_name", lines[3])
+        self.assertTrue(lines[3].endswith(" shop�]0;pwned��"))
+        self.assertTrue(lines[7].endswith(" main��[1A"))
 
     @patch("builtins.print")
     @patch("bank.get_body")
@@ -821,11 +821,11 @@ class PrintableTest(TestCase):
 
     def test_what_is_not_printable_is_a_question_mark(self):
         cases = {
-            "a\x1b[2Kb": "a?[2Kb",
-            "a\nb\rc\td": "a?b?c?d",
-            "a\x00b\x07c\x7fd\x9be": "a?b?c?d?e",  # 0x9b: the CSI of the C1 controls, an escape by itself
-            "a\u202eb\u2028c": "a?b?c",  # Right-to-left override, line separator
-            os.fsdecode(b"a\xff\xfeb"): "a??b",
+            "a\x1b[2Kb": "a�[2Kb",
+            "a\nb\rc\td": "a�b�c�d",
+            "a\x00b\x07c\x7fd\x9be": "a�b�c�d�e",  # 0x9b: the CSI of the C1 controls, an escape by itself
+            "a\u202eb\u2028c": "a�b�c",  # Right-to-left override, line separator
+            os.fsdecode(b"a\xff\xfeb"): "a��b",
         }
         for text, shown in cases.items():
             with self.subTest(text=text):
@@ -1066,9 +1066,9 @@ class LinksTest(StateTestCase):
 
     def test_file_names_are_printed_without_what_a_terminal_would_obey(self, mock_print):
         names = {
-            "title\x1b]0;pwned\x07\x1b[2K.pdf": "title?]0;pwned??[2K.pdf",  # Escape sequences
-            "line\n0 file(s), 0 linked, 0 not linked.pdf": "line?0 file(s), 0 linked, 0 not linked.pdf",
-            os.fsdecode(b"latin1-\xe9.pdf"): "latin1-?.pdf",  # Not UTF-8: print would raise on it
+            "title\x1b]0;pwned\x07\x1b[2K.pdf": "title�]0;pwned��[2K.pdf",  # Escape sequences
+            "line\n0 file(s), 0 linked, 0 not linked.pdf": "line�0 file(s), 0 linked, 0 not linked.pdf",
+            os.fsdecode(b"latin1-\xe9.pdf"): "latin1-�.pdf",  # Not UTF-8: print would raise on it
         }
         paths = [self.write_file(name, PDF + name.encode(errors="surrogateescape")) for name in names]
         documents = self.home / "documents"
@@ -1121,7 +1121,7 @@ class NetworkErrorTest(StateTestCase):
         cases = {
             b"": "HTTP 500 Internal Server Error",
             b"<Error>\n  <Code>AccessDenied</Code>\x1b[31m\n</Error>": (
-                "HTTP 500 Internal Server Error: <Error> <Code>AccessDenied</Code>?[31m </Error>"
+                "HTTP 500 Internal Server Error: <Error> <Code>AccessDenied</Code>�[31m </Error>"
             ),
             b'["a list"]': 'HTTP 500 Internal Server Error: ["a list"]',
             b"x" * 5000: "HTTP 500 Internal Server Error: " + "x" * 300,
@@ -1271,9 +1271,9 @@ class ReconcileTest(StateTestCase):
         self.assertEqual(
             printed,
             [
-                f"✓ linked           tion-1 shop?]0;pwned?? {self.documents / 'train?[1A?.pdf'}",
-                "✗ on Qonto only    tion-2 shop?]0;pwned?? attachment att?[2K-hotel",
-                f"✗ not linked       {self.documents / 'meal-?.jpg'}",
+                f"✓ linked           tion-1 shop�]0;pwned�� {self.documents / 'train�[1A�.pdf'}",
+                "✗ on Qonto only    tion-2 shop�]0;pwned�� attachment att�[2K-hotel",
+                f"✗ not linked       {self.documents / 'meal-�.jpg'}",
                 "2 attachment(s) on Qonto: 1 newly linked, 1 on Qonto only"
                 " ─ 2 local file(s): 1 not linked, 0 linked here only",
             ],
@@ -1515,11 +1515,11 @@ class CommandLineTest(StateTestCase):
         with patch.dict(os.environ, {"PYTHONIOENCODING": "utf-8:strict"}):  # As with a UTF-8 locale that is not C
             code, output = self.run_bank("unlinked", str(documents))
             self.assertEqual(
-                (code, output.splitlines()[:2]), (1, [f"{documents}/latin1-?.pdf", f"{documents}/line?break.pdf"])
+                (code, output.splitlines()[:2]), (1, [f"{documents}/latin1-�.pdf", f"{documents}/line�break.pdf"])
             )
             code, output = self.run_bank("unlinked", str(documents / os.fsdecode(b"nowhere-\xe9")))
             self.assertEqual(code, 255)
-            self.assertIn(f"Not a file or a directory: {documents}/nowhere-?  !!", output)
+            self.assertIn(f"Not a file or a directory: {documents}/nowhere-�  !!", output)
 
     def test_unlinked_is_local(self):
         receipt = self.write_file("receipt.jpg", JPG)

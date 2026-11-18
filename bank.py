@@ -152,11 +152,13 @@ class BankException(Exception):
 
 def printable(value) -> str:
     """
-    What can be printed of a string that is not ours (a file name, what the API answers): a "?" replaces whatever
+    What can be printed of a string that is not ours (a file name, what the API answers): a "�" replaces whatever
     is not printable. A terminal obeys the escape sequences that it is given, a new line makes a line of its own,
     and a file name that is not UTF-8 could not be printed at all.
+    It is U+FFFD, the replacement character: what decoding with errors="replace" gives as well, never in a real
+    text (a "?" could be), and printable itself, so that what went through here can go through here again.
     """
-    return "".join(c if c.isprintable() else "?" for c in str(value))
+    return "".join(c if c.isprintable() else "\ufffd" for c in str(value))
 
 
 def detect_file_type(data: bytes) -> tuple[str, str]:
