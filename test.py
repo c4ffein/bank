@@ -1,6 +1,9 @@
+import fcntl
 import os
 import subprocess
+import sys
 import tempfile
+from contextlib import contextmanager
 from email.message import Message
 from hashlib import sha256
 from io import BytesIO
@@ -16,13 +19,19 @@ from bank import (
     BankException,
     Config,
     Transaction,
+    add_known_attachment,
+    add_link,
     detect_file_type,
+    get_known_attachments,
     get_links,
     make_pinned_ssl_context,
     parse_date_params,
     print_unlinked,
+    read_json,
     resolve_pins,
+    state_lock,
     state_path,
+    write_json_atomic,
 )
 
 REAL_HOME = Path.home()
@@ -604,6 +613,93 @@ class HermeticTest(StateTestCase):
         self.assertEqual(list(loads(cache_path.read_text())), ["test-org-slug-1-transaction-1"])
         self.assertEqual(cache_path.stat().st_mode & 0o777, 0o600)
 
+    def test_cache_that_is_not_ours_is_left_as_it_is(self):
+        self.state.mkdir(parents=True)
+        cache_path = self.state / "transactions.json"
+        for content in ("[]", '{"test-org-slug-1-transaction-1": "a transaction"}', "{not json"):
+            cache_path.write_text(content)
+            with self.subTest(content=content):
+                with self.assertRaises(BankException):
+                    self.account.save_transaction_cache([transaction(1)])
+                with self.assertRaises(BankException):
+                    self.account.get_one_transaction("transaction-1")
+                self.assertEqual(cache_path.read_text(), content)
+
+
+class ConcurrencyTest(StateTestCase):
+    """A state file is rewritten from what it holds: nothing that another process wrote in between can be lost"""
+
+    WORKER = """
+import sys
+from pathlib import Path
+from bank import Account, add_known_attachment, add_link
+n = sys.argv[1]
+account = Account({"id": "test-org-slug", "secret_key": "test-secret-key"}, ())
+for i in range(20):
+    add_link(f"transaction-{n}-{i}", Path(f"/documents/{n}/{i}"), f"{n}-{i}")
+    add_known_attachment(f"attachment-{n}-{i}", b"content")
+    account.save_transaction_cache([{"transaction_id": f"transaction-{n}-{i}"}])
+"""
+
+    @staticmethod
+    def exclusively_locked(path):
+        """Whether the exclusive lock of a state file is held, by anyone: a shared one cannot be taken then"""
+        with path.with_suffix(".lock").open("a") as lock:
+            try:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return True
+            return False
+
+    def test_read_and_rewrite_are_one_hold_of_the_exclusive_lock(self):
+        """What a lost update would need: a read that is not under the lock that the rewrite takes"""
+        events = []
+
+        @contextmanager
+        def lock(path, exclusive):
+            events.append("lock")
+            with state_lock(path, exclusive):
+                yield
+            events.append("unlock")
+
+        def read(path, default):
+            events.append(("read", self.exclusively_locked(path)))
+            return read_json(path, default)
+
+        def write(path, data):
+            events.append(("write", self.exclusively_locked(path)))
+            return write_json_atomic(path, data)
+
+        writers = {
+            "transactions": lambda: self.account.save_transaction_cache([transaction(1)]),
+            "links": lambda: add_link("test-org-slug-1-transaction-1", Path("/documents/a.pdf"), "a hash"),
+            "attachments": lambda: add_known_attachment("att-train", PDF),
+        }
+        for name, writer in writers.items():
+            events.clear()
+            with self.subTest(name=name):
+                with patch("bank.state_lock", lock), patch("bank.read_json", read):
+                    with patch("bank.write_json_atomic", write):
+                        writer()
+                self.assertEqual(events, ["lock", ("read", True), ("write", True), "unlock"])
+
+    def test_readers_do_not_exclude_each_other(self):
+        add_link("test-org-slug-1-transaction-1", Path("/documents/a.pdf"), "a hash")
+        with state_lock(self.state / "qonto-transaction-id-to-local-invoices.json", exclusive=False):
+            self.assertEqual(len(get_links()), 1)  # Would never return, if it was not a shared lock
+
+    def test_processes_that_write_at_once_lose_nothing(self):
+        """The real thing: HOME is the one of this test for them too, they all write the same three files"""
+        command = [sys.executable, "-c", self.WORKER]
+        processes = [subprocess.Popen([*command, str(n)], stderr=subprocess.PIPE, text=True) for n in range(4)]
+        self.assertEqual([process.communicate()[1] for process in processes], [""] * 4)
+        self.assertEqual([process.returncode for process in processes], [0] * 4)
+        expected = {f"{n}-{i}" for n in range(4) for i in range(20)}
+        self.assertEqual({link["sha256"] for link in get_links()}, expected)
+        self.assertEqual(set(get_known_attachments()), {f"attachment-{e}" for e in expected})
+        self.assertEqual(set(self.account.get_transaction_cache()), {f"transaction-{e}" for e in expected})
+        self.assertEqual([path.name for path in self.state.iterdir() if path.suffix == ".tmp"], [])
+
 
 class PaginationTest(StateTestCase):
     PAGES = {1: [1, 2], 2: [3, 4], 3: [5]}
@@ -687,9 +783,23 @@ class FileTypeTest(TestCase):
 
 @patch("builtins.print")
 class JustifyTest(StateTestCase):
+    """Qonto as a dict, for what the transactions already have: {transaction number: {attachment id: content}}"""
+
     def setUp(self):
         super().setUp()
         self.account.save_transaction_cache([transaction(1), transaction(2)])
+        self.qonto = {}
+        get_body_patch = patch("bank.get_body", side_effect=self.get_body)
+        self.mock_get_body = get_body_patch.start()
+        self.addCleanup(get_body_patch.stop)
+
+    def get_body(self, addr, url, *args, **kwargs):
+        n = int(url.removesuffix(b"/attachments").rsplit(b"-", 1)[1])
+        return {"attachments": [{"id": a, "url": f"https://s3/{n}/{a}"} for a in self.qonto.get(n, {})]}
+
+    def fetch(self, request, pin_command, cafile=None):
+        n, attachment_id = request.full_url.removeprefix("https://s3/").split("/")
+        return "application/octet-stream", self.qonto[int(n)][attachment_id]
 
     def log(self):
         return [loads(line) for line in (self.state / "justify_log.jsonl").read_text().splitlines()]
@@ -768,6 +878,69 @@ class JustifyTest(StateTestCase):
         self.assertEqual(get_links(), [link])
         self.account.justify("transaction-1", str(path))
         self.assertEqual(get_links(), [link])
+
+    @patch("bank.post_body", return_value={})
+    def test_file_that_the_transaction_already_has_is_not_sent_again_unless_forced(self, mock_post_body, mock_print):
+        path = self.write_file("invoice.pdf", PDF)
+        self.qonto = {1: {"att-other": PNG, "att-invoice": PDF}, 2: {"att-other": PNG}}
+        with patch("bank.fetch", side_effect=self.fetch) as mock_fetch:
+            self.account.justify("transaction-1", str(path))
+            mock_post_body.assert_not_called()
+            self.assertIn("Already on this transaction", mock_print.call_args_list[-2][0][0])
+            self.assertEqual([link["transaction_id"] for link in get_links()], ["test-org-slug-1-transaction-1"])
+            self.assertFalse((self.state / "justify_log.jsonl").exists())  # Nothing was sent: nothing to log
+            self.assertEqual(mock_fetch.call_count, 2)
+            self.account.justify("transaction-1", str(path))  # Asked again, but attachments are downloaded once
+            self.assertEqual((mock_fetch.call_count, mock_post_body.call_count), (2, 0))
+            self.account.justify("transaction-2", str(path))  # Another transaction, that does not have it: sent
+            self.assertEqual(mock_post_body.call_count, 1)
+            self.account.justify("transaction-1", str(path), force=True)
+            self.assertEqual(mock_post_body.call_count, 2)
+
+    @patch("bank.post_body", side_effect=BankException("Connection error: no answer after 30s"))
+    def test_file_that_was_received_without_an_answer_is_not_sent_again(self, mock_post_body, mock_print):
+        path = self.write_file("invoice.pdf", PDF)
+        with self.assertRaises(BankException):
+            self.account.justify("transaction-1", str(path))
+        self.qonto = {1: {"att-invoice": PDF}}  # Qonto had received it: only the answer was lost
+        with patch("bank.fetch", side_effect=self.fetch):
+            self.account.justify("transaction-1", str(path))
+        self.assertEqual(mock_post_body.call_count, 1)
+        self.assertEqual([entry["status"] for entry in self.log()], ["started", "failed"])
+        self.assertEqual([link["full_path"] for link in get_links()], [str(path)])
+
+    @patch("bank.post_body", return_value={})
+    def test_nothing_is_sent_when_what_the_transaction_has_is_not_known(self, mock_post_body, mock_print):
+        path = self.write_file("invoice.pdf", PDF)
+        self.qonto = {1: {"att-other": PNG}}
+        fetch_error = BankException("HTTP 403 Forbidden")
+        for what, expected in (("api", "HTTP 500"), ("download", "HTTP 403 Forbidden"), ("pin", "S3 certificate")):
+            self.mock_get_body.side_effect = BankException("HTTP 500") if what == "api" else self.get_body
+            self.account.s3_pin_command = None if what == "pin" else ("/bin/echo", "b" * 64)
+            with self.subTest(what=what), patch("bank.fetch", side_effect=fetch_error):
+                with self.assertRaises(BankException) as ctx:
+                    self.account.justify("transaction-1", str(path))
+                self.assertIn("nothing sent", str(ctx.exception))
+                self.assertIn(expected, str(ctx.exception))
+                mock_post_body.assert_not_called()
+        self.assertEqual(get_links(), [])
+        self.mock_get_body.reset_mock()
+        self.account.justify("transaction-1", str(path), force=True)  # Sent without asking anything
+        self.assertEqual((mock_post_body.call_count, self.mock_get_body.call_count), (1, 0))
+        self.account.justify("transaction-2", str(self.write_file("other.pdf", PDF + b"other")))  # No pin needed
+        self.assertEqual(mock_post_body.call_count, 2)
+
+    def test_attempt_is_on_disk_before_the_request(self, mock_print):
+        synced = []
+
+        def post_body(*args, **kwargs):
+            synced.append((mock_fsync.call_count, [entry["status"] for entry in self.log()]))
+            return {}
+
+        with patch("bank.os.fsync", wraps=os.fsync) as mock_fsync, patch("bank.post_body", side_effect=post_body):
+            self.account.justify("transaction-1", str(self.write_file("invoice.pdf", PDF)))
+            self.assertEqual(synced, [(2, ["started"])])  # The log, and its directory
+            self.assertGreaterEqual(mock_fsync.call_count, 4)  # Then the same for "success"
 
 
 @patch("builtins.print")
@@ -966,7 +1139,12 @@ class ReconcileTest(StateTestCase):
         if url.endswith(b"/attachments"):
             n = int(url.split(b"/")[3].rsplit(b"-", 1)[1])
             return {"attachments": [{"id": a, "url": f"https://s3/{n}/{a}"} for a in self.qonto[n]]}
-        transactions = [transaction(n, attachment_ids=list(attachments)) for n, attachments in self.qonto.items()]
+        wanted = True if b"with_attachments=true" in url else False if b"with_attachments=false" in url else None
+        transactions = [
+            transaction(n, attachment_ids=list(attachments))
+            for n, attachments in self.qonto.items()
+            if wanted is None or wanted == bool(attachments)
+        ]
         return {"transactions": transactions, "meta": {"next_page": None}}
 
     def fetch(self, request, pin_command, cafile=None):
@@ -1061,6 +1239,52 @@ class ReconcileTest(StateTestCase):
         self.assertEqual(code, 0)
         self.assertIn(f"· linked here only tion-1 label 1 {meal}", printed)
         self.assertIn("3 local file(s): 0 not linked, 1 linked here only", printed[-1])
+
+    def test_file_that_was_sent_and_is_gone_from_qonto_is_said(self, mock_print):
+        self.write_file("train.pdf", PDF)
+        hotel = self.write_file("hotel.png", PNG)
+        self.qonto[2] = {}
+        self.account.save_transaction_cache([transaction(2)])
+        with patch("bank.get_body", side_effect=self.get_body), patch("bank.post_body", return_value={}):
+            self.account.justify("transaction-2", str(hotel))
+        self.qonto[2] = {"att-hotel": PNG}  # Sent: it is there
+        code, printed, asked, _ = self.reconcile(mock_print)
+        self.assertEqual((code, len(printed), len(asked)), (0, 2, 4))  # att-hotel is new: transaction 2 is asked
+        gone = f"✗ gone from Qonto  tion-2 label 2 {hotel}"
+        # Removed on Qonto, from a transaction that still has an attachment
+        self.qonto[2] = {"att-meal": JPG}
+        code, printed, asked, _ = self.reconcile(mock_print)
+        self.assertEqual(code, 1)
+        self.assertEqual(printed[:2], ["✗ on Qonto only    tion-2 label 2 attachment att-meal", gone])
+        self.assertIn("2 local file(s): 0 not linked, 0 linked here only, 1 gone from Qonto", printed[-1])
+        self.assertFalse(any(b"with_attachments=false" in url for url in asked))
+        # Removed on Qonto, from a transaction that has no attachment anymore: only then are these fetched
+        self.qonto[2] = {}
+        code, printed, asked, _ = self.reconcile(mock_print)
+        self.assertEqual((code, printed[0], len(printed)), (1, gone, 2))
+        self.assertEqual([b"with_attachments=false" in url for url in asked], [False, False, False, True])
+        # The link is still there, and the file is still a linked one
+        self.assertEqual(self.links(), {("1", "train.pdf"), ("2", "hotel.png")})
+        # Sent again: nothing to say anymore
+        self.qonto[2] = {"att-hotel-again": PNG}
+        self.assertEqual(self.reconcile(mock_print)[0], 0)
+
+    def test_file_that_is_gone_from_qonto_is_only_said_for_what_is_asked(self, mock_print):
+        hotel = self.write_file("hotel.png", PNG)
+        self.qonto = {1: {"att-train": PDF}, 2: {}}
+        self.account.save_transaction_cache([transaction(1), transaction(2)])
+        with patch("bank.get_body", side_effect=self.get_body), patch("bank.post_body", return_value={}):
+            self.account.justify("transaction-2", str(hotel))
+        self.account.link("transaction-1", str(hotel))  # Linked without being sent: not gone, it never was there
+        code, printed, _, _ = self.reconcile(mock_print)
+        self.assertEqual(code, 1)
+        self.assertEqual(
+            printed[1:3], [f"· linked here only tion-1 label 1 {hotel}", f"✗ gone from Qonto  tion-2 label 2 {hotel}"]
+        )
+        hotel.unlink()  # The local files are what is compared: this one is not one of them anymore
+        code, printed, asked, _ = self.reconcile(mock_print)
+        self.assertFalse(any("gone from Qonto" in line for line in printed))
+        self.assertEqual(len(asked), 2)
 
     def test_same_file_on_two_transactions(self, mock_print):
         self.write_file("train.pdf", PDF)

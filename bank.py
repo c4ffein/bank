@@ -206,6 +206,15 @@ def read_state(path: Path, default):
         return default
 
 
+def fsync_directory(path: Path) -> None:
+    """Force a directory to disk: what makes a file that was created or renamed in it survive a crash"""
+    dir_fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
+
+
 def write_json_atomic(path: Path, data) -> None:
     """Rewrite a state file - the caller must hold its exclusive lock"""
     # Atomic write via temp file, created 0o600 up front (financial data must not be world-readable)
@@ -218,11 +227,14 @@ def write_json_atomic(path: Path, data) -> None:
     # Atomic replace - readers see either the whole old or whole new file, never partial
     temp_path.replace(path)
     # fsync the directory too, so the rename itself survives a crash (not just the file contents)
-    dir_fd = os.open(path.parent, os.O_RDONLY)
-    try:
-        os.fsync(dir_fd)
-    finally:
-        os.close(dir_fd)
+    fsync_directory(path.parent)
+
+
+def check_transaction_cache(data, path: Path) -> dict[str, dict]:
+    """The content of the transactions cache - a BankException when it is not what save_transaction_cache writes"""
+    if not isinstance(data, dict) or not all(isinstance(transaction, dict) for transaction in data.values()):
+        raise BankException(f"Transactions cache is not what is expected: {path}")
+    return data
 
 
 def check_links(data, path: Path) -> list[dict]:
@@ -870,14 +882,15 @@ class Account:
         print(f"{TITLE}\n{'─' * len(TITLE)}{self._subinfos_str(response_dict, 0, None)}")
 
     def get_transaction_cache(self):
-        return read_state(state_path("transactions.json"), {})
+        cache_path = state_path("transactions.json")
+        return check_transaction_cache(read_state(cache_path, {}), cache_path)
 
     def save_transaction_cache(self, obtained_transactions):
         cache_path = state_path("transactions.json")
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         # Separate lock file + atomic write for crash safety - the existing cache is read under the same lock
         with state_lock(cache_path, exclusive=True):
-            existing = read_json(cache_path, {})
+            existing = check_transaction_cache(read_json(cache_path, {}), cache_path)
             write_json_atomic(cache_path, {**existing, **{t["transaction_id"]: t for t in obtained_transactions}})
 
     def get_full_transactions(self, partial_id):
@@ -996,6 +1009,23 @@ class Account:
             print(f"{Color.DIM.value}    SHA256: {Color.GREEN.value}{sha256(content).hexdigest()}{Color.WHITE.value}")
         return 1 if failed else 0
 
+    def get_remote_hashes(self, transaction_id) -> set[str]:
+        """
+        SHA256 of each of the attachments that a transaction has on Qonto right now, by its id (the UUID).
+        As reconcile does, an attachment is only downloaded the first time that its id is seen.
+        """
+        known = get_known_attachments()
+        hashes = set()
+        for attachment in self.get_attachments(transaction_id):
+            attachment_id = attachment.get("id") if isinstance(attachment, dict) else None
+            if not isinstance(attachment_id, str):
+                raise BankException("No attachment id")
+            if attachment_id not in known:
+                self.require_s3_pin()
+                known[attachment_id] = add_known_attachment(attachment_id, self.download_attachment(attachment))
+            hashes.add(known[attachment_id]["sha256"])
+        return hashes
+
     def _log_justify_attempt(self, transaction_id, idempotency_key, file_size, digest, status, error=None):
         """Log justify attempt to file: for recovery, and to know what was already sent (see _justify_sent_at)"""
         log_path = state_path("justify_log.jsonl")
@@ -1012,31 +1042,35 @@ class Account:
         if error:
             log_entry["error"] = str(error)
 
-        # Append-only, created 0o600 up front
+        # Append-only, created 0o600 up front. On disk before going on: "started" has to be there before the request
         fd = os.open(log_path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
         with os.fdopen(fd, "a") as f:
             f.write(dumps(log_entry) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        fsync_directory(log_path.parent)  # The log itself, the first time
 
-    def _justify_sent_at(self, transaction_id, digest):
-        """When this file was successfully sent to this transaction, as the log has it - None when it never was"""
+    def _justify_successes(self):
+        """The entries of the log that are a success, oldest first - none when there is no log"""
         try:
             lines = state_path("justify_log.jsonl").read_text().splitlines()
         except FileNotFoundError:
-            return None
-        for line in reversed(lines):
+            return
+        for line in lines:
             try:
                 entry = loads(line)
             except ValueError:  # A line that a crash cut short: not a success
                 continue
-            if not isinstance(entry, dict):
-                continue
-            if (entry.get("transaction_id"), entry.get("sha256"), entry.get("status")) == (
-                transaction_id,
-                digest,
-                "success",
-            ):
-                return entry.get("timestamp")
-        return None
+            if isinstance(entry, dict) and entry.get("status") == "success":
+                yield entry
+
+    def _justify_sent_at(self, transaction_id, digest):
+        """When this file was successfully sent to this transaction, as the log has it - None when it never was"""
+        sent_at = None
+        for entry in self._justify_successes():
+            if (entry.get("transaction_id"), entry.get("sha256")) == (transaction_id, digest):
+                sent_at = entry.get("timestamp")  # The last time
+        return sent_at
 
     def link(self, partial_id, file_path):
         """Link a local file to a transaction, without sending anything: see add_link"""
@@ -1052,7 +1086,8 @@ class Account:
     def justify(self, partial_id, file_path, force=False):
         """
         Send a local file (PDF, JPEG or PNG) to a transaction as an attachment, then link it: see add_link.
-        A file that the log says was already sent to this transaction is not sent again, unless force.
+        A file is not sent again, unless force, when the log says that it was already sent to this transaction,
+        or when the transaction already has it on Qonto: what an answer that was lost, or another machine, left there.
         """
         transaction = self.get_one_transaction(partial_id)
         transaction_id = transaction["id"]
@@ -1068,9 +1103,23 @@ class Account:
             print(f"{Color.DIM.value}Add 'force' to send it again{Color.WHITE.value}")
             return
 
+        if not force:
+            # The log only knows the answers that were received: Qonto is asked what the transaction really has
+            try:
+                already_there = digest in self.get_remote_hashes(transaction_id)
+            except BankException as e:
+                raise BankException(
+                    f"Could not check what this transaction already has, nothing sent: {e} (add 'force' to send anyway)"
+                ) from e
+            if already_there:
+                add_link(transaction["transaction_id"], path, digest)
+                print(f"{Color.GREEN.value}✓ Already on this transaction{Color.WHITE.value}: nothing sent, linked")
+                print(f"{Color.DIM.value}Add 'force' to send it again{Color.WHITE.value}")
+                return
+
         # Same transaction and same file: same key. Qonto answers a key that it has seen in the last 30 minutes
         # without doing anything again, so that sending again after a lost answer cannot attach the file twice.
-        # Past these 30 minutes, the log above is what prevents it. force is a new key: always a new attachment.
+        # Past these 30 minutes, the check above is what prevents it. force is a new key: always a new attachment.
         idempo = str(uuid4() if force else uuid5(NAMESPACE_URL, f"bank:justify:{transaction_id}:{digest}"))
 
         # Log the attempt before making the request
@@ -1115,11 +1164,14 @@ class Account:
         - An attachment that is one of the local files: this file is linked to the transaction, if it was not
         - An attachment that is none of them is said: it is on Qonto only
         - A local file that is linked to no transaction is said: as unlinked does
-        Returns 1 when one of the last two happens, or when an attachment could not be downloaded.
+        - A local file that the log says was sent to a transaction that does not have it anymore is said: it is gone
+          from Qonto. A file that was only linked (bank link) is not: it never was there
+        Returns 1 when one of the last three happens, or when an attachment could not be downloaded.
 
         Qonto gives no hash, but an id for each attachment: an attachment is only downloaded the first time that
         its id is seen (see get_known_attachments), and a transaction is only asked for its attachments when it
-        has some that are not known yet.
+        has some that are not known yet. The transactions without any attachment are only fetched when a file
+        that was sent may be linked to one of them.
         """
         RED, GREEN, DIM, WHITE = Color.RED.value, Color.GREEN.value, Color.DIM.value, Color.WHITE.value
         local_hashes = list(local_file_hashes(paths))  # First: a wrong path is said before anything is fetched
@@ -1165,23 +1217,37 @@ class Account:
         # The other way: local files, against the links
         fetched = {t.transaction_id: t for t in transactions}
         linked_hashes = {digest for _, digest in linked}
-        local_only = unlinked = 0
-        for transaction_id, digest in sorted(linked - on_qonto):
-            if transaction_id in fetched and digest in local:  # Linked without being sent (bank link): not an error
+        local_only = unlinked = gone = 0
+        here_only = sorted(link for link in linked - on_qonto if link[1] in local)
+        # The log has the id of a transaction, a link has its transaction_id: the transaction says which goes with which
+        sent = {(entry.get("transaction_id"), entry.get("sha256")) for entry in self._justify_successes()}
+        sent_hashes = {digest for _, digest in sent}
+        without_attachments = {}
+        if any(transaction_id not in fetched and digest in sent_hashes for transaction_id, digest in here_only):
+            others, _ = self.fetch_transactions(attachments=False, date_filter=date_filter)
+            without_attachments = {t.transaction_id: t for t in others}
+        for transaction_id, digest in here_only:
+            t = fetched.get(transaction_id) or without_attachments.get(transaction_id)
+            if t is None:  # Not a transaction of these dates
+                continue
+            short = f"{Color.PURP.value}{t.transaction_id[-6:]}{WHITE} {t.label}"
+            if (t.id, digest) in sent:  # It was there: someone removed it
+                gone += 1
+                print(f"{RED}✗ gone from Qonto  {WHITE}{short}{DIM} {local[digest]}{WHITE}")
+            elif transaction_id in fetched:  # Linked without being sent (bank link): not an error
                 local_only += 1
-                t = fetched[transaction_id]
-                short = f"{Color.PURP.value}{t.transaction_id[-6:]}{WHITE} {t.label}"
                 print(f"{DIM}· linked here only {WHITE}{short}{DIM} {local[digest]}{WHITE}")
         for path, digest in local_hashes:
             if digest not in linked_hashes:
                 unlinked += 1
                 print(f"{RED}✗ not linked       {WHITE}{path}")
-        problems = remote_only + unlinked + failed
+        problems = remote_only + unlinked + failed + gone
         print(
             f"{RED if problems else GREEN}"
             f"{len(on_qonto)} attachment(s) on Qonto: {new_links} newly linked, {remote_only} on Qonto only"
             f"{f', {failed} not downloaded' if failed else ''}"
-            f" ─ {len(local_hashes)} local file(s): {unlinked} not linked, {local_only} linked here only{WHITE}"
+            f" ─ {len(local_hashes)} local file(s): {unlinked} not linked, {local_only} linked here only"
+            f"{f', {gone} gone from Qonto' if gone else ''}{WHITE}"
         )
         return 1 if problems else 0
 
